@@ -66,8 +66,9 @@ jobs:
 
       - name: Build release Lua for a generic x86-64 CPU
         run: |
+          # Set the default without overriding per-object CPU feature flags.
           make -j"$(nproc)" MODE=rel \
-            TARGET_ARCH="-march=x86-64 -mtune=generic" \
+            CONFIG_TARGET_ARCH="-march=x86-64 -mtune=generic" \
             o/rel/tool/lua/lua.dbg \
             o/rel/tool/build/apelink.dbg
 
