@@ -12,12 +12,58 @@ dependency to be written in C. The application and driver registration are
 C, while wgpu-native contributes Rust and LLVM contributes C++ code linked
 into the same executable.
 
-**Status: embedded shader execution passes locally on Linux.** The combined
-prototype passes both numerical checks below using the embedded CPU provider,
-with zero native Vulkan loader opens and an unchanged executable hash. The
-reproducible source-build and native Windows/isolation CI gates remain pending.
+The compute shaders in this prototype are WGSL strings embedded in the C
+application. The host dispatch and independent numerical reference are C;
+the shader language is WGSL. Python, CMake, and native shader-generation
+tools participate in the build and are not deployed runtime dependencies.
+
+**Status: the same executable passed embedded CPU compute on Windows and
+isolated Linux in CI.** The fresh source build and both operating-system jobs
+passed in [run 37492821586](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37492821586)
+on October 6, 2026. Both numerical checks used the embedded CPU provider,
+reported zero native Vulkan loader opens, and left the executable hash unchanged.
 The earlier Windows/Linux results in [README.md](README.md) used external Mesa
 drivers; they are a separate baseline and do not establish this embedded mode.
+
+## Verified artifact and results
+
+Download [webgpu-cpu-ape-x86_64](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37492821586/artifacts/11429053420)
+from the successful run. Its `webgpu_compute.exe` is **66,213,389 bytes
+(63.15 MiB)**. Both runtime jobs received this application SHA-256:
+
+```text
+b1ba63319fbe92d92aad40ae7673961e42a789e65ca82fa71bd12e2bc37a8063
+```
+
+The artifact's `BUILD.json` records tested source commit
+`3e59a1236a88fc0435fda2df307f172e0ddce69b`, `source_dirty: false`, and
+`embedded_software_vulkan: true`. It includes wgpu-native 29.0.1.1, Mesa
+25.2.8, LLVM 19.1.7, and Cosmocc 4.0.2. The download ZIP is 25,963,468 bytes
+and also contains build metadata, checksums, license notices, the optional
+explicit APE loader, and the Linux isolation verifier.
+
+| Check | Tested environment | Result |
+| --- | --- | --- |
+| Fresh source build | Ubuntu 24.04 x86-64 | Passed with an LLVM cache miss; all LLVM and Mesa build steps completed |
+| Embedded CPU compute | Windows Server 2022 x86-64 | Collatz and all 143 f32 matrix results passed; maximum matrix error 0 |
+| Embedded CPU compute in an empty root | Ubuntu 24.04 x86-64 | Both numerical checks passed with actual chroot and unchanged application/loader hashes |
+| Single-file Linux bootstrap | Ubuntu 24.04 x86-64 | Passed with no preinstalled APE loader on the controlled path; extracted the 9,249-byte bundled loader |
+| Independent LLVM JIT probe | Linux build host and Windows Server 2022 | C callback, mixed integer/float arguments, 4,000 calls from four threads, and disposal checks passed |
+
+The Windows job installed no Mesa or Vulkan package and required the embedded
+provider trace and zero native Vulkan loader opens. The Linux isolation roots
+contained only the application, its explicit APE loader, and writable `/tmp`.
+The separate bootstrap check used the normal host shell and its six controlled
+utilities; it was not the empty-root test.
+
+The [build log](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37492821586/job/112369649725),
+[Windows log](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37492821586/job/112395096819),
+and [Linux log](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37492821586/job/112395096823)
+record the gates. Downloadable [Windows results](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37492821586/artifacts/11429397194)
+and [Linux results](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37492821586/artifacts/11429785819)
+contain the runtime logs and Linux JSON reports. These results establish the
+two exercised compute workloads on these systems; they do not establish full
+Vulkan/WebGPU conformance or hardware-GPU compatibility.
 
 ## Build and run
 
@@ -53,8 +99,9 @@ The initial shell path needs `uname`, `mkdir`, `dd`, `gzip`, `chmod`, and `mv`.
 It extracts a small APE loader into temporary storage, then executes the
 application without rewriting its bytes. The local check passed with only
 those utilities on `PATH`, no installed `ape` command, and an initially empty
-temporary directory. The explicit loader above provides a separate startup
-route for environments where those shell utilities are unavailable.
+temporary directory; the same check subsequently passed in the recorded CI
+run. The explicit loader above provides a separate startup route for
+environments where those shell utilities are unavailable.
 
 On Windows x86-64, copy that same executable and run:
 
@@ -161,9 +208,8 @@ source and executed copies. Logs and a JSON report remain outside the
 temporary root for review.
 
 Unavailable chroot capability is a failure of this verification gate, never
-a pass or a substitute host-environment run. The current local execution
-container reports `EPERM` for chroot; the actual deployment-isolation result
-must therefore come from the capable CI runner.
+a pass or a substitute host-environment run. The recorded CI run above passed
+the actual chroot capability check and both isolated numerical executions.
 
 The Windows job downloads the same application and installs no Vulkan runtime
 or Mesa package. It requires the full numerical result markers, a CPU adapter,

@@ -126,13 +126,15 @@ test results and CI output for which operating systems and executable hashes
 have actually passed. A successful Linux build or simulated ABI test is not a
 native Windows execution result.
 
-The initial fully linked Linux prototype passed both application workloads:
-Collatz produced [0, 1, 7, 2], and all 143 matrix results matched with maximum
-absolute error zero. Both runs reported the embedded CPU adapter and zero
-native Vulkan-loader opens, and left the executable's SHA-256 unchanged. The
-prototype result establishes real software shader execution on the tested
-Linux host. Native Windows execution and additional CPU models require their
-own run of the same executable.
+Fresh CI run 37492821586 built the published source and passed both application
+workloads on native Windows Server 2022 and Ubuntu 24.04 x86-64 using the same
+executable. Collatz produced [0, 1, 7, 2], and all 143 matrix results matched
+with maximum absolute error zero. Both systems reported the embedded CPU
+adapter and zero native Vulkan-loader opens, and left the executable's SHA-256
+unchanged. Linux also passed actual empty-root isolation and a separate
+single-file bootstrap check. The tested source, executable checksum, artifact,
+and job links are recorded in third_party/wgpu_native/CPU.md. Additional CPU
+models and shader features require their own workload evidence.
 
 The CPU JIT selects host instruction capabilities at runtime. Its existing
 F16C and wgpu capability checks are retained. The present validation work does

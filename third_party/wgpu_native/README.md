@@ -1,8 +1,10 @@
 # WebGPU inside a Cosmopolitan executable
 
 For the `webgpu-cpu` branch's static Mesa/LLVM CPU-driver experiment, see
-[Embedded CPU Vulkan](CPU.md). Its validation is tracked separately from the
-external-driver baseline described below.
+[Embedded CPU Vulkan](CPU.md). Its identical executable has passed native
+Windows and isolated Linux CPU compute in CI; the artifact and exact checksum
+are recorded there. That validation is separate from the external-driver
+baseline described below.
 
 This experimental branch builds a **C application and wgpu-native's Rust
 implementation into one x86-64 Actually Portable Executable (APE)**. The selected
