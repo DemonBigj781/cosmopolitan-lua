@@ -1,0 +1,157 @@
+name: Build Linux x64
+run-name: Original Linux x64 - ${{ github.ref_name }}
+
+on:
+  push:
+    branches: [original]
+  pull_request:
+    branches: [original]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Original Lua for Linux x86-64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      LC_ALL: C
+      PACKAGE: cosmopolitan-original-linux-x86_64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            make unzip wget ca-certificates binutils file
+
+      # APE is needed by the build tools; the packaged programs use native ELF.
+      - name: Enable APE for build helpers
+        run: |
+          sudo install -m 0755 build/bootstrap/ape.elf /usr/bin/ape
+          if [[ ! -e /proc/sys/fs/binfmt_misc/register ]]; then
+            sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+          fi
+          if [[ ! -e /proc/sys/fs/binfmt_misc/APE ]]; then
+            printf '%s\n' ':APE:M::MZqFpD::/usr/bin/ape:' |
+              sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null
+          fi
+          if [[ ! -e /proc/sys/fs/binfmt_misc/APE-jart ]]; then
+            printf '%s\n' ':APE-jart:M::jartsr::/usr/bin/ape:' |
+              sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null
+          fi
+
+      - name: Cache the repository-pinned compiler
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cosmocc
+          key: cosmocc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Makefile', 'build/download-cosmocc.sh') }}
+
+      - name: Build upstream Lua, luac, and package checks
+        run: |
+          # Set the default without replacing per-object CPU feature flags.
+          V=0 make -j"$(nproc)" MODE=rel \
+            CONFIG_TARGET_ARCH="-march=x86-64 -mtune=generic" \
+            o/rel/third_party/lua \
+            o/rel/tool/build/apelink.dbg
+
+      - name: Create static Linux ELF executables
+        run: |
+          mkdir -p "dist/$PACKAGE/bin"
+          for program in lua luac; do
+            o/rel/tool/build/apelink.dbg -V1 -s \
+              -o "dist/$PACKAGE/bin/$program" \
+              "o/rel/third_party/lua/$program.dbg"
+            chmod 0755 "dist/$PACKAGE/bin/$program"
+          done
+          cp LICENSE "dist/$PACKAGE/LICENSE"
+          printf 'Repository: %s\nCommit: %s\nSource: jart/cosmopolitan\nTarget: Linux x86-64\nCPU: x86-64 baseline\nRuntime: statically linked Cosmopolitan\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_SHA" > "dist/$PACKAGE/BUILD-INFO.txt"
+
+      - name: Verify architecture and static linking
+        run: |
+          for program in lua luac; do
+            binary="dist/$PACKAGE/bin/$program"
+            file "$binary"
+            readelf -hW "$binary" | grep -E 'Class:.*ELF64'
+            readelf -hW "$binary" | grep -E 'Machine:.*Advanced Micro Devices X86-64'
+            if readelf -lW "$binary" | grep -q 'INTERP'; then
+              echo "::error::$program unexpectedly requires an ELF interpreter"
+              exit 1
+            fi
+            if readelf -dW "$binary" | grep -q '(NEEDED)'; then
+              echo "::error::$program unexpectedly requires shared libraries"
+              exit 1
+            fi
+            "$binary" -v
+          done
+
+      - name: Test Lua, unix bindings, and compiled bytecode
+        run: |
+          cat > "$RUNNER_TEMP/original-lua-smoke.lua" <<'LUA'
+          local unix = require("unix")
+          assert(type(unix.getcwd()) == "string")
+          assert(unix.getpid() > 0)
+          local values = {3, 1, 2}
+          table.sort(values)
+          assert(table.concat(values, ",") == "1,2,3")
+          assert(6 * 7 == 42)
+          local f = assert(io.tmpfile())
+          assert(f:write("original-linux-x64"))
+          assert(f:seek("set", 0) == 0)
+          assert(f:read("*a") == "original-linux-x64")
+          assert(f:close())
+          print("Upstream Lua, unix bindings, and file I/O: OK")
+          LUA
+          "dist/$PACKAGE/bin/lua" "$RUNNER_TEMP/original-lua-smoke.lua"
+          "dist/$PACKAGE/bin/luac" -o "$RUNNER_TEMP/original-lua-smoke.luac" \
+            "$RUNNER_TEMP/original-lua-smoke.lua"
+          "dist/$PACKAGE/bin/lua" "$RUNNER_TEMP/original-lua-smoke.luac"
+
+      - name: Package executables and checksums
+        run: |
+          (
+            cd "dist/$PACKAGE"
+            sha256sum bin/lua bin/luac LICENSE BUILD-INFO.txt > SHA256SUMS
+          )
+          tar -C dist -czf "dist/$PACKAGE.tar.gz" "$PACKAGE"
+          (
+            cd dist
+            sha256sum "$PACKAGE.tar.gz" > "$PACKAGE.tar.gz.sha256"
+          )
+          {
+            echo "### Original branch: Linux x86-64 build"
+            echo
+            printf 'Download the artifact and extract `%s.tar.gz`.\n' "$PACKAGE"
+            printf 'Run `%s/bin/lua script.lua` or `%s/bin/luac -o script.luac script.lua`.\n' "$PACKAGE" "$PACKAGE"
+            echo
+            echo "Upstream Lua and luac with a static Cosmopolitan runtime."
+            echo "No glibc or APE loader installation is required."
+            echo "The archive preserves executable permissions."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload original Linux x64 artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cosmopolitan-original-linux-x86_64
+          path: |
+            dist/cosmopolitan-original-linux-x86_64.tar.gz
+            dist/cosmopolitan-original-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
