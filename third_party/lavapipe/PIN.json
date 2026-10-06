@@ -1,0 +1,26 @@
+{
+  "format": 1,
+  "mesa": {
+    "version": "25.2.8",
+    "url": "https://archive.mesa3d.org/mesa-25.2.8.tar.xz",
+    "sha256": "097842f3e49d996868b38688db87b006f7d4541e93ce86d2f341d8b3e7be7c93",
+    "release_notes": "https://docs.mesa3d.org/relnotes/25.2.8.html",
+    "archive_root": "mesa-25.2.8",
+    "role": "Statically linked headless lavapipe, llvmpipe, NIR and Vulkan runtime"
+  },
+  "glslang": {
+    "version": "15.4.0",
+    "url": "https://codeload.github.com/KhronosGroup/glslang/tar.gz/refs/tags/15.4.0",
+    "sha256": "b16c78e7604b9be9f546ee35ad8b6db6f39bbbbfb19e8d038b6fe2ea5bba4ff4",
+    "archive_root": "glslang-15.4.0",
+    "role": "Build-host shader generator only; not linked into the executable"
+  },
+  "llvm": {
+    "version": "19.1.7",
+    "recipe": "third_party/llvm_cosmo/build.sh",
+    "metadata": "o/llvm-cosmo/LINK.json",
+    "role": "Cosmopolitan static X86 MCJIT with explicit SysV target and C symbol registration"
+  },
+  "source_policy": "Download and verify complete release archives under o/lavapipe. Apply only the checked-in patches. No Mesa source pruning; no system Mesa, Vulkan loader or LLVM library is linked.",
+  "target": "x86_64 Cosmopolitan APE, headless Vulkan software compute"
+}

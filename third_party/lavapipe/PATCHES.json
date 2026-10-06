@@ -1,0 +1,31 @@
+{
+  "mesa_version": "25.2.8",
+  "patches": [
+    {
+      "file": "patches/mesa-25.2.8-cosmopolitan.patch",
+      "sha256": "98d9dcd4d58359d712ee4b8dda33d1bcc3ff6193743e160125c1ed402c7beaee",
+      "files": [
+        "include/drm-uapi/drm.h",
+        "include/renderdoc_app.h",
+        "meson.build",
+        "src/c11/impl/threads_posix.c",
+        "src/gallium/auxiliary/gallivm/lp_bld_init.c",
+        "src/gallium/auxiliary/gallivm/lp_bld_misc.cpp",
+        "src/gallium/auxiliary/rtasm/rtasm_execmem.c",
+        "src/gallium/include/pipe/p_defines.h",
+        "src/gallium/targets/lavapipe/meson.build",
+        "src/util/detect_os.h",
+        "src/util/memstream.c",
+        "src/util/memstream.h",
+        "src/util/os_misc.c",
+        "src/util/u_dl.c",
+        "src/util/u_thread.c",
+        "src/vulkan/runtime/vk_instance.c",
+        "src/vulkan/wsi/meson.build",
+        "src/vulkan/wsi/wsi_common.c"
+      ],
+      "scope": "Cosmopolitan-only POSIX/SDK compatibility, static ICD build, disabled native driver/presentation paths, SysV JIT ABI and explicit static libc/libm registration."
+    }
+  ],
+  "generated_files": "The build recipe creates a Meson LLVM dependency from completed third_party/llvm_cosmo metadata. This dependency is not an upstream source substitution or stub runtime."
+}

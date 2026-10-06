@@ -1,5 +1,9 @@
 # WebGPU inside a Cosmopolitan executable
 
+For the `webgpu-cpu` branch's static Mesa/LLVM CPU-driver experiment, see
+[Embedded CPU Vulkan](CPU.md). Its validation is tracked separately from the
+external-driver baseline described below.
+
 This experimental branch builds a **C application and wgpu-native's Rust
 implementation into one x86-64 Actually Portable Executable (APE)**. The selected
 backend is Vulkan. It does not bundle separately compiled Windows and Linux
@@ -159,7 +163,7 @@ results do not establish a physical GPU vendor compatibility matrix.
    defaults instead of using Cosmopolitan's separately allocated stacks. It
    runs before checksums are recorded, so both OSes receive the same bytes.
 
-## Current boundaries
+## Native-provider baseline boundaries
 
 - **CPU/OS scope:** x86-64 Windows and Linux are the intended targets. This
   integration does not claim ARM64, macOS/Metal, Direct3D 12, browser execution,
@@ -171,8 +175,9 @@ results do not establish a physical GPU vendor compatibility matrix.
 - **Headless scope:** surfaces, swapchains, rendering, external resource
   sharing, and broader multithreaded driver behavior require further tests.
   Forward scalar ABI coverage alone does not establish those features.
-- **Host dependency:** Vulkan loaders and drivers remain OS-specific system
-  software. They are not included in the executable.
+- **Host dependency:** The native provider uses OS-specific Vulkan loaders and
+  drivers. The separate `--software` build and its embedded driver are described
+  in [CPU.md](CPU.md).
 - **Linux loader helper:** Cosmopolitan 4.0.2's `cosmo_dlopen` invokes the host
   `cc` to compile a small native helper on first use. Therefore this version
   does **not** yet prove deployment to a compiler-free Linux installation.
@@ -182,8 +187,9 @@ results do not establish a physical GPU vendor compatibility matrix.
   documented limitations. Building with a normal Linux Rust toolchain and
   merely renaming its library would not provide the same runtime.
 - **AI work remains:** WebGPU supplies compute operations. A model loader,
-  tensor engine, operator kernels, numerical tests, and CPU fallback must
-  still be integrated to run a particular model.
+  tensor engine, and a model's operator kernels and numerical tests must still
+  be integrated. Embedded CPU execution is the experiment tracked in
+  [CPU.md](CPU.md).
 
 Successful startup is kept separate from successful compute, and software
 compute is kept separate from hardware acceleration in the CI job names and
@@ -199,8 +205,9 @@ not establish that a model's kernels will run correctly on a particular device.
 
 The current Vulkan path is the first target for hardware tests on x86-64
 Windows and Linux. The next application milestones are adapter enumeration and
-selection, feature/limit reporting, and numerical tests for a small AI operator
-such as matrix multiplication. Keep an implementation with modest feature
+selection, feature/limit reporting, and tests of more AI operators. The new
+`--matmul` check provides an initial tiled f32 matrix operation; its embedded
+execution is tracked in [CPU.md](CPU.md). Keep an implementation with modest feature
 requirements, then select optimized kernels only when the device provides
 their required features. A portable CPU implementation is also needed when
 no suitable GPU path is available; the external lavapipe driver used in CI is

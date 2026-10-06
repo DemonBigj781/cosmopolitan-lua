@@ -1,0 +1,153 @@
+Mesa lavapipe for Cosmopolitan
+=============================
+
+This directory builds Mesa 25.2.8 lavapipe, its llvmpipe CPU backend and the
+required Mesa compiler/runtime code into a Cosmopolitan static archive. It uses
+the separately pinned Cosmopolitan LLVM 19.1.7 MCJIT port in
+third_party/llvm_cosmo. The WebGPU application can link these archives into the
+same x86-64 APE executable as wgpu-native and select them with --software.
+
+The intended deployment is one identical executable for Windows and Linux.
+The software path calls the linked lvp_GetInstanceProcAddr directly and does
+not load a system Vulkan loader, Mesa ICD, LLVM shared library or GPU driver.
+The CPU executes the shaders. This is an experimental headless compute port;
+it is not a Vulkan conformance claim or an inference engine.
+
+Mesa's driver code and registration interface are predominantly C. LLVM is
+C++, and the surrounding wgpu-native implementation is Rust. Each component
+uses the same Cosmopolitan runtime and ABI in the executable.
+
+Build
+-----
+
+From the repository root on Linux x86-64:
+
+    bash third_party/wgpu_native/build.sh --software
+    o/webgpu/ape-x86_64.elf o/webgpu/webgpu_compute.exe --software
+    o/webgpu/ape-x86_64.elf o/webgpu/webgpu_compute.exe --software --matmul
+
+For the Mesa/LLVM libraries and direct-driver diagnostic alone:
+
+    bash third_party/lavapipe/build.sh
+
+Python 3.12 or later, a host C/C++ compiler and ordinary source-build tools are
+needed. Python packages are installed into an isolated directory under o/;
+requirements-host.txt pins their versions. Host glslang 15.4.0 is built from a
+verified source archive using the LLVM recipe's recorded host CMake. It generates
+Mesa's internal shaders during the build and is not linked into the APE.
+
+LAVAPIPE_JOBS controls the Mesa/host-shader-generator parallelism (default 2).
+The LLVM build has its own LLVM_COSMO_JOBS setting. LLVM_COSMO_OUT and the
+recipe's --llvm-metadata option can reuse an already completed, matching LLVM
+build; no host LLVM dependency search is used as a substitute.
+
+The main handoff file is o/lavapipe/LINK.json. Its link_args array contains the
+registration archive, the complete Mesa archive under whole-archive flags and
+the exact LLVM static closure. It also records source and patch hashes, the
+direct-driver probe and the complete nested LLVM build/probe metadata. Build
+paths in this generated metadata are local absolute paths. Do not copy a
+LINK.json to another checkout and assume its archives still exist there.
+
+The registration archive exports:
+
+    int cosmo_wgpu_lavapipe_register(void);
+
+Call this before selecting the embedded provider and creating a WebGPU instance.
+The strong reference in register.c pulls lvp_GetInstanceProcAddr out of the
+driver archive. The surrounding loader's embedded-provider dispatch supplies
+the Vulkan loader-level compatibility behavior; no ICD JSON file is required.
+
+Sources and local changes
+------------------------
+
+PIN.json records the complete Mesa and glslang archive URLs and SHA-256 hashes.
+PATCHES.json records the checked-in portability patch and affected files.
+Sources are downloaded under o/ rather than importing the entire Mesa/LLVM
+trees into this repository. The complete release sources are preserved there;
+unused drivers are disabled through the build configuration, not removed.
+
+The Mesa build enables only the swrast Vulkan driver and its llvmpipe backend.
+OpenGL, GLX, EGL, GLES, GBM, platform window systems, video codecs, external DRM
+dependencies, shader disk cache, zlib, zstd, expat, sensors, OpenMP and external
+unwind support are disabled. The necessary NIR, SPIR-V and Vulkan common runtime
+code remains enabled. Mesa's ordinary internal C++ utility code is retained.
+
+The portability patch makes the following substantive changes:
+
+* Recognize __COSMOPOLITAN__ as a POSIX API environment while keeping Linux and
+  Windows compile-time code paths disabled. Memory information and thread
+  naming use Cosmopolitan's runtime OS implementations.
+* Use Mesa's existing pthread timed-mutex fallback for SDK 4.0.2, which lacks
+  pthread_mutex_timedlock. Per-thread CPU-time profiling follows Mesa's existing
+  unsupported-platform behavior and reports zero; elapsed-clock timing remains
+  available.
+* Disable native dlopen/dladdr discovery, Linux FD-memory sharing and sealing,
+  and RenderDoc dynamic capture. DRM header integer/format constants can still
+  be included without BSD-only ioctl headers. No DRM device path is enabled.
+* Omit the unused headless-surface WSI implementation. Headless compute needs
+  neither a headless surface nor a swapchain, and platform surface extensions
+  remain disabled by Mesa's existing lavapipe configuration guards.
+* Build the final ICD target as a regular static archive. Meson includes its
+  complete Mesa object dependency closure in that archive. Required weak
+  entrypoint definitions are retained at final link with whole-archive flags.
+* Force shader MCJIT to use the x86_64-unknown-linux-musl SysV/ELF target on every
+  runtime OS. Mark all post-optimization functions with LLVM's noredzone
+  attribute, including functions introduced by coroutine lowering. Windows
+  does not preserve the SysV stack red zone.
+* Register the linked C memory, allocation and f32/f64 math functions with
+  LLVMAddSymbol during Mesa's once-only LLVM initialization. Optimizer-generated
+  libcalls consequently reach Cosmopolitan's own functions. Mesa's printf,
+  clock and coroutine allocation hooks already have explicit per-module maps.
+* Supply a diagnostic text-stream fallback for SDK 4.0.2, which has no
+  open_memstream. NIR-to-text diagnostics can use an automatically removed
+  temporary file; normal shader execution and readback do not depend on this
+  diagnostic path. A writable temporary directory is needed when using it.
+* Move the legacy executable-memory MAP_ANONYMOUS fallback after the platform
+  header so it does not rewrite Cosmopolitan's runtime constant declaration.
+
+The paired LLVM port is responsible for executable-memory allocation,
+protection and disposal through Cosmopolitan. Its source patches and standalone
+JIT validation are recorded separately in third_party/llvm_cosmo and nested in
+the generated LINK.json.
+
+Validation and current scope
+----------------------------
+
+The direct-driver probe in probe.c creates a Vulkan instance through the
+statically linked entrypoint, enumerates a physical device, verifies that it is
+a CPU device and destroys the instance. The initial Linux x86-64 prototype
+passed with "llvmpipe (LLVM 19.1.7, 256 bits)" and Vulkan API 1.4.318. This test
+alone does not compile or execute a shader.
+
+The full application tests are in third_party/wgpu_native/test.sh and its CPU
+documentation. They cover integer Collatz dispatch/readback and an f32 tiled
+matrix multiplication with workgroup memory and barriers. Consult the recorded
+test results and CI output for which operating systems and executable hashes
+have actually passed. A successful Linux build or simulated ABI test is not a
+native Windows execution result.
+
+The initial fully linked Linux prototype passed both application workloads:
+Collatz produced [0, 1, 7, 2], and all 143 matrix results matched with maximum
+absolute error zero. Both runs reported the embedded CPU adapter and zero
+native Vulkan-loader opens, and left the executable's SHA-256 unchanged. The
+prototype result establishes real software shader execution on the tested
+Linux host. Native Windows execution and additional CPU models require their
+own run of the same executable.
+
+The CPU JIT selects host instruction capabilities at runtime. Its existing
+F16C and wgpu capability checks are retained. The present validation work does
+not establish all optional Vulkan/WebGPU shader features, all CPU models or
+half/double-precision combinations. Additional LLVM libcalls should be mapped
+only with the correct ABI and semantics when a concrete workload needs them.
+No native dlsym fallback is enabled for unresolved JIT symbols.
+
+Licenses
+--------
+
+licenses/ retains Mesa's upstream license index/texts, the radix-sort license,
+glslang's complete license, and Mesa-build-NOTICES.txt. The latter collects
+copyright/license blocks from the actual Mesa compiler inputs and dependency
+headers of this configuration. Complete original notices also remain in the
+verified release source archive. The LLVM and Cosmopolitan runtimes have their
+own separately retained notices. Keep the corresponding notices with binary
+distributions; the source tree contains components under more than one license.

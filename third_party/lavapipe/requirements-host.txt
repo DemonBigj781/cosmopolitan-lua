@@ -1,0 +1,7 @@
+# Build-host Python tools only. glslang and target libraries are source-built.
+meson==1.12.1
+ninja==1.13.2
+Mako==1.4.3
+MarkupSafe==3.0.4
+PyYAML==6.0.3
+packaging==26.3

@@ -1,0 +1,545 @@
+--- a/include/drm-uapi/drm.h
++++ b/include/drm-uapi/drm.h
+@@ -44,7 +44,14 @@
+ #else /* One of the BSDs */
+ 
+ #include <stdint.h>
++#if defined(__COSMOPOLITAN__)
++/* Only portable format constants/types are consumed by embedded llvmpipe;
++ * DRM devices and Linux ioctl paths are disabled in this build.
++ */
++#include <sys/ioctl.h>
++#else
+ #include <sys/ioccom.h>
++#endif
+ #include <sys/types.h>
+ typedef int8_t   __s8;
+ typedef uint8_t  __u8;
+--- a/include/renderdoc_app.h
++++ b/include/renderdoc_app.h
+@@ -35,7 +35,7 @@
+ 
+ #if defined(WIN32)
+ #define RENDERDOC_CC __cdecl
+-#elif defined(__linux__)
++#elif defined(__linux__) || defined(__COSMOPOLITAN__)
+ #define RENDERDOC_CC
+ #elif defined(__APPLE__)
+ #define RENDERDOC_CC
+--- a/meson.build
++++ b/meson.build
+@@ -1401,6 +1401,9 @@
+ }
+ 
+ foreach f, prefix: functions_to_detect
++  if host_machine.system() == 'cosmopolitan' and f == 'memfd_create'
++    continue
++  endif
+   if cc.has_function(f, prefix: prefix)
+     pre_args += '-DHAVE_@0@'.format(f.to_upper())
+   endif
+@@ -1523,7 +1526,7 @@
+ 
+ # check for dl support
+ dep_dl = null_dep
+-if host_machine.system() != 'windows'
++if host_machine.system() != 'windows' and host_machine.system() != 'cosmopolitan'
+   if not cc.has_function('dlopen')
+     dep_dl = cc.find_library('dl', required : true)
+   endif
+@@ -1533,7 +1536,7 @@
+   endif
+ endif
+ 
+-if cc.has_function('dl_iterate_phdr')
++if host_machine.system() != 'cosmopolitan' and cc.has_function('dl_iterate_phdr')
+   pre_args += '-DHAVE_DL_ITERATE_PHDR'
+ elif with_intel_vk or with_intel_hasvk
+   error('Intel "Anvil" Vulkan driver requires the dl_iterate_phdr function')
+@@ -2016,7 +2019,7 @@
+ 
+ # Even if we find OpenMP, Gitlab CI fails to link with gcc/i386 and clang/anyarch.
+ dep_openmp = null_dep
+-if host_machine.cpu_family() == 'x86_64' and cc.get_id() == 'gcc'
++if host_machine.cpu_family() == 'x86_64' and cc.get_id() == 'gcc' and host_machine.system() != 'cosmopolitan'
+   dep_openmp = dependency('openmp', required : false)
+   if dep_openmp.found()
+     pre_args += ['-DHAVE_OPENMP']
+--- a/src/c11/impl/threads_posix.c
++++ b/src/c11/impl/threads_posix.c
+@@ -19,7 +19,7 @@
+     Use pthread_mutex_timedlock() for `mtx_timedlock()'
+     Otherwise use mtx_trylock() + *busy loop* emulation.
+ */
+-#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__)
++#if !defined(__CYGWIN__) && !defined(__APPLE__) && !defined(__NetBSD__) && !defined(__COSMOPOLITAN__)
+ #define EMULATED_THREADS_USE_NATIVE_TIMEDLOCK
+ #endif
+ 
+--- a/src/gallium/auxiliary/gallivm/lp_bld_init.c
++++ b/src/gallium/auxiliary/gallivm/lp_bld_init.c
+@@ -425,6 +425,20 @@
+                   LLVMGetExecutionEngineTargetMachine(gallivm->engine),
+                   gallivm->module_name);
+ 
++#if DETECT_OS_COSMOPOLITAN
++   /* Windows does not preserve the SysV red zone. Compiler flags for the
++    * enclosing APE do not affect JIT code. Apply this after optimization so
++    * coroutine lowering and other passes cannot leave new functions out.
++    */
++   unsigned noredzone_kind = LLVMGetEnumAttributeKindForName("noredzone", 9);
++   LLVMAttributeRef noredzone = LLVMCreateEnumAttribute(gallivm->context,
++                                                      noredzone_kind, 0);
++   for (LLVMValueRef fn = LLVMGetFirstFunction(gallivm->module); fn;
++        fn = LLVMGetNextFunction(fn)) {
++      LLVMAddAttributeAtIndex(fn, LLVMAttributeFunctionIndex, noredzone);
++   }
++#endif
++
+    /* Setting the module's DataLayout to an empty string will cause the
+     * ExecutionEngine to copy to the DataLayout string from its target machine
+     * to the module.  As of LLVM 3.8 the module and the execution engine are
+--- a/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
++++ b/src/gallium/auxiliary/gallivm/lp_bld_misc.cpp
+@@ -41,6 +41,9 @@
+ 
+ 
+ #include <stddef.h>
++#include <math.h>
++#include <stdlib.h>
++#include <string.h>
+ 
+ #include <llvm/Config/llvm-config.h>
+ #include <llvm-c/Core.h>
+@@ -108,8 +111,92 @@
+ 
+ static once_flag init_native_targets_once_flag = ONCE_FLAG_INIT;
+ 
++#if DETECT_OS_COSMOPOLITAN
++static void
++lp_register_cosmo_libcalls()
++{
++   /* LLVM's native dlopen/dlsym path is disabled in this static port.
++    * Explicitly register libcalls that optimization or instruction lowering
++    * can introduce. All addresses use the APE's SysV ABI and libc.
++    * Gallivm's own printf, clock and coroutine hooks are mapped per module.
++    */
++#define REGISTER_C(name) LLVMAddSymbol(#name, reinterpret_cast<void *>(&name))
++   REGISTER_C(memcpy);
++   REGISTER_C(memmove);
++   REGISTER_C(memset);
++   REGISTER_C(memcmp);
++   REGISTER_C(malloc);
++   REGISTER_C(calloc);
++   REGISTER_C(realloc);
++   REGISTER_C(free);
++#undef REGISTER_C
++
++#define REGISTER_UNARY(name) \
++   LLVMAddSymbol(#name, reinterpret_cast<void *>(static_cast<double (*)(double)>(&name))); \
++   LLVMAddSymbol(#name "f", reinterpret_cast<void *>(static_cast<float (*)(float)>(&name##f)))
++   REGISTER_UNARY(sqrt);
++   REGISTER_UNARY(cbrt);
++   REGISTER_UNARY(sin);
++   REGISTER_UNARY(cos);
++   REGISTER_UNARY(tan);
++   REGISTER_UNARY(asin);
++   REGISTER_UNARY(acos);
++   REGISTER_UNARY(atan);
++   REGISTER_UNARY(sinh);
++   REGISTER_UNARY(cosh);
++   REGISTER_UNARY(tanh);
++   REGISTER_UNARY(asinh);
++   REGISTER_UNARY(acosh);
++   REGISTER_UNARY(atanh);
++   REGISTER_UNARY(exp);
++   REGISTER_UNARY(exp2);
++   REGISTER_UNARY(expm1);
++   REGISTER_UNARY(log);
++   REGISTER_UNARY(log2);
++   REGISTER_UNARY(log10);
++   REGISTER_UNARY(log1p);
++   REGISTER_UNARY(floor);
++   REGISTER_UNARY(ceil);
++   REGISTER_UNARY(trunc);
++   REGISTER_UNARY(round);
++   REGISTER_UNARY(rint);
++   REGISTER_UNARY(nearbyint);
++   REGISTER_UNARY(fabs);
++#undef REGISTER_UNARY
++
++#define REGISTER_BINARY(name) \
++   LLVMAddSymbol(#name, reinterpret_cast<void *>(static_cast<double (*)(double, double)>(&name))); \
++   LLVMAddSymbol(#name "f", reinterpret_cast<void *>(static_cast<float (*)(float, float)>(&name##f)))
++   REGISTER_BINARY(pow);
++   REGISTER_BINARY(atan2);
++   REGISTER_BINARY(fmod);
++   REGISTER_BINARY(remainder);
++   REGISTER_BINARY(copysign);
++   REGISTER_BINARY(fmin);
++   REGISTER_BINARY(fmax);
++   REGISTER_BINARY(hypot);
++#undef REGISTER_BINARY
++
++   LLVMAddSymbol("fma", reinterpret_cast<void *>(static_cast<double (*)(double, double, double)>(&fma)));
++   LLVMAddSymbol("fmaf", reinterpret_cast<void *>(static_cast<float (*)(float, float, float)>(&fmaf)));
++   LLVMAddSymbol("ldexp", reinterpret_cast<void *>(static_cast<double (*)(double, int)>(&ldexp)));
++   LLVMAddSymbol("ldexpf", reinterpret_cast<void *>(static_cast<float (*)(float, int)>(&ldexpf)));
++   LLVMAddSymbol("scalbn", reinterpret_cast<void *>(static_cast<double (*)(double, int)>(&scalbn)));
++   LLVMAddSymbol("scalbnf", reinterpret_cast<void *>(static_cast<float (*)(float, int)>(&scalbnf)));
++   LLVMAddSymbol("frexp", reinterpret_cast<void *>(static_cast<double (*)(double, int *)>(&frexp)));
++   LLVMAddSymbol("frexpf", reinterpret_cast<void *>(static_cast<float (*)(float, int *)>(&frexpf)));
++   LLVMAddSymbol("modf", reinterpret_cast<void *>(static_cast<double (*)(double, double *)>(&modf)));
++   LLVMAddSymbol("modff", reinterpret_cast<void *>(static_cast<float (*)(float, float *)>(&modff)));
++   LLVMAddSymbol("sincos", reinterpret_cast<void *>(&sincos));
++   LLVMAddSymbol("sincosf", reinterpret_cast<void *>(&sincosf));
++}
++#endif
++
+ void lp_bld_init_native_targets()
+ {
++#if DETECT_OS_COSMOPOLITAN
++   lp_register_cosmo_libcalls();
++#endif
+    // If we have a native target, initialize it to ensure it is linked in and
+    // usable by the JIT.
+    llvm::InitializeNativeTarget();
+@@ -499,7 +586,12 @@
+           .setOptLevel((CodeGenOpt::Level)OptLevel);
+ #endif
+ 
+-#if DETECT_OS_WINDOWS
++#if DETECT_OS_COSMOPOLITAN
++   /* APE code and libc always use the SysV ABI, including on Windows.
++    * Keep ELF relocations and this ABI independent of the runtime OS.
++    */
++   LLVMSetTarget(M, "x86_64-unknown-linux-musl");
++#elif DETECT_OS_WINDOWS
+     /*
+      * MCJIT works on Windows, but currently only through ELF object format.
+      *
+--- a/src/gallium/auxiliary/rtasm/rtasm_execmem.c
++++ b/src/gallium/auxiliary/rtasm/rtasm_execmem.c
+@@ -39,10 +39,6 @@
+ 
+ #include "rtasm_execmem.h"
+ 
+-#ifndef MAP_ANONYMOUS
+-#define MAP_ANONYMOUS MAP_ANON
+-#endif
+-
+ #if DETECT_OS_WINDOWS
+ #include <windows.h>
+ #endif
+@@ -58,6 +54,10 @@
+ #include <unistd.h>
+ #include <sys/mman.h>
+ #include "util/u_mm.h"
++
++#ifndef MAP_ANONYMOUS
++#define MAP_ANONYMOUS MAP_ANON
++#endif
+ 
+ #define EXEC_HEAP_SIZE (10*1024*1024)
+ 
+--- a/src/gallium/include/pipe/p_defines.h
++++ b/src/gallium/include/pipe/p_defines.h
+@@ -1348,7 +1348,7 @@
+ #define PIPE_UUID_SIZE 16
+ #define PIPE_LUID_SIZE 8
+ 
+-#if DETECT_OS_POSIX
++#if DETECT_OS_POSIX && !DETECT_OS_COSMOPOLITAN
+ #define PIPE_MEMORY_FD
+ #endif
+ 
+--- a/src/gallium/targets/lavapipe/meson.build
++++ b/src/gallium/targets/lavapipe/meson.build
+@@ -1,9 +1,17 @@
+ 
+ 
+-libvulkan_lvp = shared_library(
++lvp_target_type = 'shared_library'
++lvp_target_kwargs = {'vs_module_defs': vulkan_api_def}
++if host_machine.system() == 'cosmopolitan'
++  lvp_target_type = 'static_library'
++  lvp_target_kwargs = {}
++endif
++
++libvulkan_lvp = build_target(
+   'vulkan_lvp',
+   [ 'lavapipe_target.c' ],
+-  vs_module_defs : vulkan_api_def,
++  target_type : lvp_target_type,
++  kwargs : lvp_target_kwargs,
+   include_directories : [ inc_src, inc_util, inc_include, inc_gallium, inc_gallium_aux, inc_gallium_winsys, inc_gallium_drivers ],
+   link_whole : [ liblavapipe_st ],
+   link_with : [libpipe_loader_static, libgallium, libwsw, libswdri, libws_null, libswkmsdri ],
+@@ -18,6 +26,7 @@
+   install : true,
+ )
+ 
++if host_machine.system() != 'cosmopolitan'
+ if host_machine.system() == 'windows'
+   icd_lib_path = import('fs').relative_to(get_option('bindir'), with_vulkan_icd_dir)
+   icd_file_name = 'vulkan_lvp.dll'
+@@ -66,3 +75,5 @@
+ devenv.append('VK_DRIVER_FILES', _dev_icd.full_path())
+ # Deprecated: replaced by VK_DRIVER_FILES above
+ devenv.append('VK_ICD_FILENAMES', _dev_icd.full_path())
++
++endif # host_machine.system() != 'cosmopolitan'
+--- a/src/util/detect_os.h
++++ b/src/util/detect_os.h
+@@ -14,6 +14,11 @@
+ 
+ #ifndef DETECT_OS_H
+ #define DETECT_OS_H
++
++#if defined(__COSMOPOLITAN__)
++#define DETECT_OS_COSMOPOLITAN 1
++#define DETECT_OS_POSIX 1
++#endif
+ 
+ #if defined(__linux__)
+ #define DETECT_OS_LINUX 1
+@@ -107,6 +112,9 @@
+ #ifndef DETECT_OS_CYGWIN
+ #define DETECT_OS_CYGWIN 0
+ #endif
++#ifndef DETECT_OS_COSMOPOLITAN
++#define DETECT_OS_COSMOPOLITAN 0
++#endif
+ #ifndef DETECT_OS_DRAGONFLY
+ #define DETECT_OS_DRAGONFLY 0
+ #endif
+--- a/src/util/memstream.c
++++ b/src/util/memstream.c
+@@ -34,7 +34,17 @@
+ bool
+ u_memstream_open(struct u_memstream *mem, char **bufp, size_t *sizep)
+ {
+-#ifdef _GAMING_XBOX
++#if defined(__COSMOPOLITAN__)
++   /* SDK 4.0.2 has no growable open_memstream. This diagnostic-only path
++    * uses a portable, automatically removed temporary file.
++    */
++   *bufp = NULL;
++   *sizep = 0;
++   mem->bufp = bufp;
++   mem->sizep = sizep;
++   mem->f = tmpfile();
++   return mem->f != NULL;
++#elif defined(_GAMING_XBOX)
+    int err = tmpfile_s(&mem->f);
+    mem->bufp = bufp;
+    mem->sizep = sizep;
+@@ -89,6 +99,26 @@
+ }
+ #endif /* _WIN32 */
+ 
++#if defined(__COSMOPOLITAN__)
++static int
++u_memstream_update_cosmo_buffer(struct u_memstream *mem)
++{
++   FILE *f = mem->f;
++   long pos = ftell(f);
++   if (pos < 0 || fflush(f) != 0)
++      return EOF;
++   char *buf = realloc(*mem->bufp, (size_t)pos + 1);
++   if (!buf)
++      return EOF;
++   *mem->bufp = buf;
++   if (fseek(f, 0, SEEK_SET) != 0 || fread(buf, 1, pos, f) != (size_t)pos)
++      return EOF;
++   buf[pos] = '\0';
++   *mem->sizep = pos;
++   return fseek(f, pos, SEEK_SET);
++}
++#endif
++
+ void
+ u_memstream_close(struct u_memstream *mem)
+ {
+@@ -97,6 +127,8 @@
+ #ifdef _WIN32
+    u_memstream_update_buffer(mem);
+    remove(mem->temp);
++#elif defined(__COSMOPOLITAN__)
++   (void)u_memstream_update_cosmo_buffer(mem);
+ #endif
+ 
+    fclose(f);
+@@ -105,7 +137,9 @@
+ int
+ u_memstream_flush(struct u_memstream *mem)
+ {
+-#ifndef _WIN32
++#if defined(__COSMOPOLITAN__)
++   return u_memstream_update_cosmo_buffer(mem);
++#elif !defined(_WIN32)
+    return fflush(mem->f);
+ #else
+    u_memstream_update_buffer(mem);
+--- a/src/util/memstream.h
++++ b/src/util/memstream.h
+@@ -46,9 +46,11 @@
+ struct u_memstream
+ {
+    FILE *f;
+-#ifdef _WIN32
++#if defined(_WIN32) || defined(__COSMOPOLITAN__)
+    char **bufp;
+    size_t *sizep;
++#endif
++#ifdef _WIN32
+    char temp[PATH_MAX];
+ #endif
+ };
+--- a/src/util/os_misc.c
++++ b/src/util/os_misc.c
+@@ -57,7 +57,7 @@
+ #  include <unistd.h>
+ #  include <log/log.h>
+ #  include <cutils/properties.h>
+-#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
++#elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM || DETECT_OS_COSMOPOLITAN
+ #  include <unistd.h>
+ #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
+ #  include <sys/resource.h>
+@@ -284,7 +284,7 @@
+ bool
+ os_get_total_physical_memory(uint64_t *size)
+ {
+-#if DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
++#if DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM || DETECT_OS_COSMOPOLITAN
+    const long phys_pages = sysconf(_SC_PHYS_PAGES);
+    const long page_size = sysconf(_SC_PAGE_SIZE);
+ 
+@@ -341,7 +341,16 @@
+ bool
+ os_get_available_system_memory(uint64_t *size)
+ {
+-#if DETECT_OS_LINUX
++#if DETECT_OS_COSMOPOLITAN
++   const long available_pages = sysconf(_SC_AVPHYS_PAGES);
++   const long page_size = sysconf(_SC_PAGE_SIZE);
++
++   if (available_pages < 0 || page_size <= 0)
++      return false;
++
++   *size = (uint64_t)available_pages * (uint64_t)page_size;
++   return true;
++#elif DETECT_OS_LINUX
+    char *meminfo = os_read_file("/proc/meminfo", NULL);
+    if (!meminfo)
+       return false;
+--- a/src/util/u_dl.c
++++ b/src/util/u_dl.c
+@@ -29,7 +29,7 @@
+ 
+ #include "detect_os.h"
+ 
+-#if DETECT_OS_POSIX_LITE
++#if DETECT_OS_POSIX_LITE && !DETECT_OS_COSMOPOLITAN
+ #include <dlfcn.h>
+ #endif
+ #if DETECT_OS_WINDOWS
+@@ -43,7 +43,7 @@
+ struct util_dl_library *
+ util_dl_open(const char *filename)
+ {
+-#if DETECT_OS_POSIX_LITE
++#if DETECT_OS_POSIX_LITE && !DETECT_OS_COSMOPOLITAN
+    return (struct util_dl_library *)dlopen(filename, RTLD_LAZY | RTLD_LOCAL);
+ #elif DETECT_OS_WINDOWS
+    return (struct util_dl_library *)LoadLibraryA(filename);
+@@ -57,7 +57,7 @@
+ util_dl_get_proc_address(struct util_dl_library *library,
+                          const char *procname)
+ {
+-#if DETECT_OS_POSIX_LITE
++#if DETECT_OS_POSIX_LITE && !DETECT_OS_COSMOPOLITAN
+    return (util_dl_proc) pointer_to_func(dlsym((void *)library, procname));
+ #elif DETECT_OS_WINDOWS
+    return (util_dl_proc)GetProcAddress((HMODULE)library, procname);
+@@ -70,7 +70,7 @@
+ void
+ util_dl_close(struct util_dl_library *library)
+ {
+-#if DETECT_OS_POSIX_LITE
++#if DETECT_OS_POSIX_LITE && !DETECT_OS_COSMOPOLITAN
+    dlclose((void *)library);
+ #elif DETECT_OS_WINDOWS
+    FreeLibrary((HMODULE)library);
+@@ -83,7 +83,7 @@
+ const char *
+ util_dl_error(void)
+ {
+-#if DETECT_OS_POSIX_LITE
++#if DETECT_OS_POSIX_LITE && !DETECT_OS_COSMOPOLITAN
+    return dlerror();
+ #elif DETECT_OS_WINDOWS
+    return "unknown error";
+--- a/src/util/u_thread.c
++++ b/src/util/u_thread.c
+@@ -75,7 +75,7 @@
+ void u_thread_setname( const char *name )
+ {
+ #if defined(HAVE_PTHREAD)
+-#if DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || defined(__GLIBC__) || DETECT_OS_MANAGARM || DETECT_OS_FUCHSIA
++#if DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || defined(__GLIBC__) || DETECT_OS_MANAGARM || DETECT_OS_FUCHSIA || DETECT_OS_COSMOPOLITAN
+    int ret = pthread_setname_np(pthread_self(), name);
+    if (ret == ERANGE) {
+       char buf[16];
+@@ -154,7 +154,7 @@
+ int64_t
+ util_thread_get_time_nano(thrd_t thread)
+ {
+-#if defined(HAVE_PTHREAD) && !defined(__APPLE__) && !defined(__HAIKU__) && !defined(__managarm__)
++#if defined(HAVE_PTHREAD) && !defined(__APPLE__) && !defined(__HAIKU__) && !defined(__managarm__) && !defined(__COSMOPOLITAN__)
+    struct timespec ts;
+    clockid_t cid;
+ 
+--- a/src/vulkan/runtime/vk_instance.c
++++ b/src/vulkan/runtime/vk_instance.c
+@@ -657,7 +657,7 @@
+ void
+ vk_instance_start_renderdoc_capture(struct vk_instance *instance)
+ {
+-#ifndef _WIN32
++#if !defined(_WIN32) && !defined(__COSMOPOLITAN__)
+    simple_mtx_lock(&instance->renderdoc_mtx);
+ 
+    if (!instance->renderdoc_api) {
+--- a/src/vulkan/wsi/meson.build
++++ b/src/vulkan/wsi/meson.build
+@@ -29,7 +29,7 @@
+ if with_platform_windows
+   files_vulkan_wsi += files('wsi_common_win32.cpp')
+   platform_deps += dep_dxheaders
+-else
++elif host_machine.system() != 'cosmopolitan'
+   files_vulkan_wsi += files('wsi_common_headless.c')
+ endif
+ 
+--- a/src/vulkan/wsi/wsi_common.c
++++ b/src/vulkan/wsi/wsi_common.c
+@@ -243,7 +243,7 @@
+       goto fail;
+ #endif
+ 
+-#ifndef VK_USE_PLATFORM_WIN32_KHR
++#if !defined(VK_USE_PLATFORM_WIN32_KHR) && !defined(__COSMOPOLITAN__)
+    result = wsi_headless_init_wsi(wsi, alloc, pdevice);
+    if (result != VK_SUCCESS)
+       goto fail;
+@@ -308,7 +308,7 @@
+ wsi_device_finish(struct wsi_device *wsi,
+                   const VkAllocationCallbacks *alloc)
+ {
+-#ifndef VK_USE_PLATFORM_WIN32_KHR
++#if !defined(VK_USE_PLATFORM_WIN32_KHR) && !defined(__COSMOPOLITAN__)
+    wsi_headless_finish_wsi(wsi, alloc);
+ #endif
+ #ifdef VK_USE_PLATFORM_DISPLAY_KHR
