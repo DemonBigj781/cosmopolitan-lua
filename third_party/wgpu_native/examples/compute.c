@@ -11,12 +11,14 @@
  */
 #define _POSIX_C_SOURCE 200809L
 #include "wgpu.h"
+#include <cosmo.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdatomic.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -76,6 +78,14 @@ struct MapRequest {
 };
 
 static atomic_int execution_error;
+static bool trace_enabled;
+
+static void trace_stage(const char *stage) {
+  if (trace_enabled) {
+    fprintf(stderr, "compute stage: %s\n", stage);
+    fflush(stderr);
+  }
+}
 
 static void print_view(FILE *stream, WGPUStringView message) {
   if (message.data) {
@@ -284,9 +294,11 @@ static int check_compute(void) {
   device_desc.uncapturedErrorCallbackInfo.callback = uncaptured_error;
 
   wgpuSetLogCallback(log_message, NULL);
-  wgpuSetLogLevel(WGPULogLevel_Warn);
+  wgpuSetLogLevel(trace_enabled ? WGPULogLevel_Debug : WGPULogLevel_Warn);
+  trace_stage("create instance");
   instance = wgpuCreateInstance(&instance_desc);
   REQUIRE(instance, CHECK_INITIALIZATION, "could not create a Vulkan instance");
+  trace_stage("request adapter");
   wgpuInstanceRequestAdapter(
       instance, &adapter_options,
       (WGPURequestAdapterCallbackInfo){
@@ -312,9 +324,11 @@ static int check_compute(void) {
   printf("; backend=%u (Vulkan=%u); type=%s\n", (unsigned)info.backendType,
          (unsigned)WGPUBackendType_Vulkan, adapter_kind(info.adapterType));
   bool is_vulkan = info.backendType == WGPUBackendType_Vulkan;
+  trace_stage("release adapter information");
   wgpuAdapterInfoFreeMembers(info);
   REQUIRE(is_vulkan, CHECK_INITIALIZATION, "adapter did not use Vulkan");
 
+  trace_stage("request device");
   wgpuAdapterRequestDevice(
       adapter, &device_desc,
       (WGPURequestDeviceCallbackInfo){
@@ -322,12 +336,14 @@ static int check_compute(void) {
           .callback = device_ready,
           .userdata1 = &device_request,
       });
+  trace_stage("wait for device callback");
   result = wait_callback(instance, NULL, &device_request.done, "request device");
   device = device_request.device;
   if (result)
     goto cleanup;
   REQUIRE(device_request.status == WGPURequestDeviceStatus_Success && device,
           CHECK_INITIALIZATION, "could not create a WebGPU device");
+  trace_stage("get device queue");
   queue = wgpuDeviceGetQueue(device);
   REQUIRE_OBJECT(queue, "could not obtain queue");
 
@@ -335,6 +351,7 @@ static int check_compute(void) {
   source.code = (WGPUStringView){shader, sizeof(shader) - 1};
   WGPUShaderModuleDescriptor shader_desc = WGPU_SHADER_MODULE_DESCRIPTOR_INIT;
   shader_desc.nextInChain = &source.chain;
+  trace_stage("create WGSL shader module");
   module = wgpuDeviceCreateShaderModule(device, &shader_desc);
   REQUIRE_OBJECT(module, "embedded WGSL compilation failed");
 
@@ -342,9 +359,11 @@ static int check_compute(void) {
   buffer_desc.size = sizeof(input);
   buffer_desc.usage = WGPUBufferUsage_Storage | WGPUBufferUsage_CopyDst |
                       WGPUBufferUsage_CopySrc;
+  trace_stage("create storage buffer");
   storage = wgpuDeviceCreateBuffer(device, &buffer_desc);
   REQUIRE_OBJECT(storage, "could not create storage buffer");
   buffer_desc.usage = WGPUBufferUsage_MapRead | WGPUBufferUsage_CopyDst;
+  trace_stage("create readback buffer");
   staging = wgpuDeviceCreateBuffer(device, &buffer_desc);
   REQUIRE_OBJECT(staging, "could not create readback buffer");
 
@@ -352,8 +371,10 @@ static int check_compute(void) {
       WGPU_COMPUTE_PIPELINE_DESCRIPTOR_INIT;
   pipeline_desc.compute.module = module;
   pipeline_desc.compute.entryPoint = (WGPUStringView){"main", WGPU_STRLEN};
+  trace_stage("create compute pipeline");
   pipeline = wgpuDeviceCreateComputePipeline(device, &pipeline_desc);
   REQUIRE_OBJECT(pipeline, "could not create compute pipeline");
+  trace_stage("create resource bindings");
   layout = wgpuComputePipelineGetBindGroupLayout(pipeline, 0);
   REQUIRE_OBJECT(layout, "could not obtain bind group layout");
   WGPUBindGroupEntry entry = WGPU_BIND_GROUP_ENTRY_INIT;
@@ -367,6 +388,7 @@ static int check_compute(void) {
   group = wgpuDeviceCreateBindGroup(device, &group_desc);
   REQUIRE_OBJECT(group, "could not create bind group");
 
+  trace_stage("encode compute and readback commands");
   encoder = wgpuDeviceCreateCommandEncoder(device, NULL);
   REQUIRE_OBJECT(encoder, "could not create command encoder");
   pass = wgpuCommandEncoderBeginComputePass(encoder, NULL);
@@ -381,11 +403,14 @@ static int check_compute(void) {
                                        sizeof(input));
   commands = wgpuCommandEncoderFinish(encoder, NULL);
   REQUIRE_OBJECT(commands, "could not finish command buffer");
+  trace_stage("upload input");
   wgpuQueueWriteBuffer(queue, storage, 0, input, sizeof(input));
+  trace_stage("submit compute commands");
   wgpuQueueSubmit(queue, 1, &commands);
   REQUIRE(!atomic_load_explicit(&execution_error, memory_order_acquire),
           CHECK_EXECUTION, "command submission failed");
 
+  trace_stage("request readback mapping");
   wgpuBufferMapAsync(
       staging, WGPUMapMode_Read, 0, sizeof(output),
       (WGPUBufferMapCallbackInfo){
@@ -393,12 +418,14 @@ static int check_compute(void) {
           .callback = buffer_mapped,
           .userdata1 = &map_request,
       });
+  trace_stage("wait for readback mapping");
   result = wait_callback(instance, device, &map_request.done, "map readback");
   if (result)
     goto cleanup;
   REQUIRE(map_request.status == WGPUMapAsyncStatus_Success, CHECK_EXECUTION,
           "mapping the readback buffer failed");
   mapped = true;
+  trace_stage("verify mapped output");
   const void *data = wgpuBufferGetConstMappedRange(staging, 0, sizeof(output));
   REQUIRE_OBJECT(data, "mapped range was unavailable");
   memcpy(output, data, sizeof(output));
@@ -415,6 +442,7 @@ static int check_compute(void) {
   }
 
 cleanup:
+  trace_stage("release resources");
   if (mapped)
     wgpuBufferUnmap(staging);
   if (commands)
@@ -455,6 +483,9 @@ cleanup:
 }
 
 int main(int argc, char **argv) {
+  ShowCrashReports();
+  const char *trace = getenv("COSMO_WGPU_TRACE");
+  trace_enabled = trace && *trace && strcmp(trace, "0");
   if (argc == 2 && !strcmp(argv[1], "--version"))
     return check_version();
   if (argc == 2 && !strcmp(argv[1], "--help")) {

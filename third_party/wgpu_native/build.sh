@@ -54,7 +54,7 @@ test -s "$webgpu_archive"
 # PTHREAD_MUTEX_INITIALIZER in this Cosmocc release initializes trailing
 # private fields implicitly; -Wextra otherwise warns about the SDK macro.
 "$webgpu_sdk/generated/linker-x86_64.bash" \
-  -mcosmo -std=c11 -O2 -fno-stack-protector \
+  -mcosmo -std=c11 -O2 -g -fno-omit-frame-pointer -fno-stack-protector \
   -Wall -Wextra -Werror -Wno-missing-field-initializers \
   -I"$webgpu_dir/upstream/ffi" \
   -I"$webgpu_dir/upstream/ffi/webgpu-headers" \
@@ -69,6 +69,7 @@ test -s "$webgpu_archive"
 sh "$webgpu_sdk/vendor/cosmocc/bin/apelink" \
   -l "$webgpu_sdk/vendor/cosmocc/bin/ape-x86_64.elf" \
   -o "$webgpu_out/webgpu_compute.exe" "$webgpu_out/webgpu_compute.com.dbg"
+python3 "$webgpu_dir/configure_pe.py" "$webgpu_out/webgpu_compute.exe"
 cp -- "$webgpu_sdk/vendor/cosmocc/bin/ape-x86_64.elf" "$webgpu_out/ape-x86_64.elf"
 chmod +x -- "$webgpu_out/webgpu_compute.exe" "$webgpu_out/ape-x86_64.elf"
 
@@ -89,6 +90,8 @@ manifest = {
     "cosmocc": "4.0.2",
     "rust": "nightly-2026-07-28",
     "features": ["wgsl", "vulkan"],
+    "windows_native_stack_reserve": 8 * 1024 * 1024,
+    "windows_native_stack_commit": 4096,
     "lock_sha256": hashlib.sha256(lock.read_bytes()).hexdigest(),
     "application_sha256": hashlib.sha256((out / "webgpu_compute.exe").read_bytes()).hexdigest(),
     "source_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),

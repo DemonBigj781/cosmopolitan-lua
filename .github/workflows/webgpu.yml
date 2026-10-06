@@ -86,6 +86,8 @@ jobs:
           assert data[pe_offset:pe_offset + 4] == b"PE\0\0", "Missing PE signature"
           machine, = struct.unpack_from("<H", data, pe_offset + 4)
           assert machine == 0x8664, "Expected Windows x86-64 machine code"
+          reserve, commit = struct.unpack_from("<QQ", data, pe_offset + 24 + 72)
+          assert reserve == 8 * 1024 * 1024 and commit == 4096, "Unexpected native thread stack defaults"
           PY
           cp LICENSE o/webgpu/LICENSE.cosmopolitan
           # Preserve build.sh's source/toolchain manifest and license provenance.
@@ -127,7 +129,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: webgpu-build-log
-          path: o/webgpu/build.log
+          path: |
+            o/webgpu/build.log
+            o/webgpu/webgpu_compute.com.dbg
           if-no-files-found: ignore
           retention-days: 14
 
@@ -298,6 +302,7 @@ jobs:
     env:
       EXPECTED_SHA256: ${{ needs.build.outputs.executable_sha256 }}
       WGPU_BACKEND: vulkan
+      COSMO_WGPU_TRACE: '1'
     steps:
       - name: Download the already-built application
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1

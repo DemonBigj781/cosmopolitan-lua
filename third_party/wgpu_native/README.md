@@ -5,12 +5,13 @@ implementation into one x86-64 Actually Portable Executable (APE)**. The selecte
 backend is Vulkan. It does not bundle separately compiled Windows and Linux
 copies of wgpu-native.
 
-The initial program is a headless compute check. A local Linux run has compiled
-the embedded WGSL shader, dispatched four workgroups, and verified every result
-through Mesa lavapipe. The output identifies lavapipe as a CPU/software adapter.
-Actual Windows execution and physical GPU acceleration still need their own
-successful runs. This is a working Linux compute prototype, not a completed
-all-OS AI runtime.
+The initial program is a headless compute check. Local and CI Linux runs have
+compiled the embedded WGSL shader, dispatched four workgroups, and verified
+every result through Mesa lavapipe. CI has also called the embedded WebGPU
+version API on Windows using the same executable compiled on Linux. Windows
+compute is checked separately from startup. Lavapipe is a CPU/software adapter;
+physical GPU acceleration still needs hardware tests. This is an experimental
+compute foundation for an AI runtime.
 
 ## Build
 
@@ -42,7 +43,7 @@ The build produces:
 | `o/webgpu/licenses/` | Dependency license notices for redistribution |
 | `o/rust-ape/build/x86_64-unknown-linux-musl/release/libwgpu_native.a` | Cosmopolitan-compatible static library for the final link |
 
-The sample build measured **5,723,789 bytes** for the executable. Its size and
+The sample build measured **5,775,216 bytes** for the executable. Its size and
 hash can change with later source edits; use the manifest from your build.
 
 If libclang is installed outside the system search path, set `LIBCLANG_PATH`
@@ -84,10 +85,13 @@ testing those commands on Windows. The branch's CI downloads the one Linux
 build artifact for independent Linux and Windows startup tests, and separately
 tests compute on both systems using lavapipe. The Windows compute job downloads
 checksum-pinned Mesa and LunarG runtime components; it does not rebuild wgpu.
+Set `COSMO_WGPU_TRACE=1` for stage markers and WebGPU debug messages. The
+sample also enables Cosmopolitan crash reports, and CI retains its matching
+`.com.dbg` image with the build diagnostics.
 
 ## What has been measured
 
-Local validation on 2026-10-06:
+Local and CI validation on 2026-10-06:
 
 | Check | Result | What it establishes |
 | --- | --- | --- |
@@ -97,7 +101,8 @@ Local validation on 2026-10-06:
 | `--version` | Passed | Calls the actual Rust `wgpuGetVersion`, returning `29.0.1.1` |
 | WebGPU shader dispatch/readback | Passed on Linux lavapipe | Buffer upload, WGSL compilation, Vulkan execution, synchronization, and exact output |
 | Executable hash before/after both runs | Unchanged | Both checks executed the same file without rewriting it |
-| Native Windows execution | Pending | Must be verified by the Windows runtime job or an actual machine |
+| Same-artifact Windows startup in CI | Passed | The Linux-built executable calls the embedded Rust WebGPU API on Windows with its hash unchanged |
+| Windows WebGPU compute | Pending | Checked separately from startup by the Windows software Vulkan job |
 | Physical GPU acceleration | Pending | Software Vulkan does not establish hardware support or performance |
 
 The successful compute run reported:
@@ -134,6 +139,11 @@ headless Vulkan compute and readback: PASS
    and stack arguments; a generic integer-only cast would not suffice.
 6. The C smoke program embeds WGSL and checks its numerical results. It needs
    no browser, window, display server, or external shader file.
+7. `configure_pe.py` raises the generated executable's Windows native thread
+   stack reservation from the SDK's 64 KiB to 8 MiB, retaining the 4 KiB initial
+   commitment. This accommodates driver-created threads that inherit PE stack
+   defaults instead of using Cosmopolitan's separately allocated stacks. It
+   runs before checksums are recorded, so both OSes receive the same bytes.
 
 ## Current boundaries
 
@@ -165,6 +175,40 @@ Successful startup is kept separate from successful compute, and software
 compute is kept separate from hardware acceleration in the CI job names and
 test output. Build once, then compare the same artifact's hash on each host
 before making a broader portability claim.
+
+## Direction: broad GPU coverage
+
+The goal is to use as many GPU vendors and models as practical from one
+application. Compatibility needs evidence for each OS, CPU architecture,
+GPU/driver combination, and required compute feature. An API name alone does
+not establish that a model's kernels will run correctly on a particular device.
+
+The current Vulkan path is the first target for hardware tests on x86-64
+Windows and Linux. The next application milestones are adapter enumeration and
+selection, feature/limit reporting, and numerical tests for a small AI operator
+such as matrix multiplication. Keep an implementation with modest feature
+requirements, then select optimized kernels only when the device provides
+their required features. A portable CPU implementation is also needed when
+no suitable GPU path is available; the external lavapipe driver used in CI is
+not an embedded CPU fallback.
+
+[Upstream wgpu](https://github.com/gfx-rs/wgpu#supported-platforms) also has
+Metal and Direct3D 12 backends. Adding them to this APE requires their native
+library, ABI, runtime, and architecture integration; enabling Cargo features
+alone does not provide it. CUDA/HIP/OpenCL-specific host runtimes and GPU
+libraries likewise need explicit integration if a workload depends on them.
+
+[HipScript](https://github.com/lights0123/hipscript/) is a useful reference for
+translating a restricted set of HIP/CUDA kernels to WebGPU. Evaluate its kernel
+translation independently from its browser/WebAssembly host runtime. This
+branch does not yet import or test HipScript. Translating fixed kernels during
+the build and embedding their WGSL can keep additional compiler dependencies
+off the deployment machine.
+
+Using several GPUs simultaneously is another application milestone. It needs
+per-device buffers and queues, an explicit division of work, and transfers and
+synchronization between devices. This prototype does not pool GPU memory or
+distribute a model across adapters.
 
 ## Sources and licenses
 
