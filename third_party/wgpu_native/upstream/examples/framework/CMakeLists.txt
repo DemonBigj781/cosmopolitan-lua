@@ -1,0 +1,23 @@
+cmake_minimum_required(VERSION 3.20)
+project(framework LANGUAGES C)
+
+add_library(framework framework.c)
+
+if (MSVC)
+    add_compile_options(/W4)
+else()
+    add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+include_directories(${CMAKE_SOURCE_DIR}/../ffi)
+include_directories(${CMAKE_SOURCE_DIR}/../ffi/webgpu-headers)
+
+if (WIN32)
+    set(OS_LIBRARIES d3dcompiler ws2_32 userenv bcrypt ntdll opengl32)
+elseif(UNIX AND NOT APPLE)
+    set(OS_LIBRARIES "-lm -ldl")
+elseif(APPLE)
+    set(OS_LIBRARIES "-framework CoreFoundation -framework QuartzCore -framework Metal")
+endif()
+
+target_link_libraries(framework ${WGPU_LIBRARY} ${OS_LIBRARIES})

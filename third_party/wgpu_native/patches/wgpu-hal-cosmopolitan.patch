@@ -1,0 +1,23 @@
+--- a/src/vulkan/instance.rs
++++ b/src/vulkan/instance.rs
+@@ -568,6 +568,20 @@
+         callback: Option<Box<super::CreateInstanceCallback>>,
+     ) -> Result<Self, crate::InstanceError> {
+         profiling::scope!("Init Vulkan Backend");
++
++        #[cfg(rust_ape_shim)]
++        if desc.flags.intersects(
++            wgt::InstanceFlags::DEBUG
++                | wgt::InstanceFlags::VALIDATION
++                | wgt::InstanceFlags::GPU_BASED_VALIDATION,
++        ) || callback.is_some() {
++            // Native Vulkan callbacks require a reverse ABI/TLS bridge. The
++            // first Cosmopolitan target is headless compute with no callbacks
++            // into Rust from foreign driver threads. Fail before loading it.
++            return Err(crate::InstanceError::new(String::from(
++                "Cosmopolitan Vulkan currently requires debug/validation flags off and no native instance callback",
++            )));
++        }
+ 
+         let entry = unsafe {
+             profiling::scope!("Load vk library");

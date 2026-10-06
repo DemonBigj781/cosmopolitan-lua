@@ -3,6 +3,18 @@
 [![build](https://github.com/jart/cosmopolitan/actions/workflows/build.yml/badge.svg)](https://github.com/jart/cosmopolitan/actions/workflows/build.yml)
 # Cosmopolitan
 
+## Experimental WebGPU branch
+
+The `webgpu` branch combines Cosmopolitan with a pinned **wgpu-native** source
+release and the experimental **rust-ape** runtime. It builds a C application,
+the Rust WebGPU implementation, and the Vulkan backend into one x86-64 APE.
+The first target is headless compute on Windows and Linux.
+
+An actual Linux run through Mesa lavapipe has passed shader compilation,
+dispatch, and numerical readback. Windows execution and hardware acceleration
+are separate validation gates. See the [WebGPU integration guide](third_party/wgpu_native/README.md)
+for the build command, measured results, architecture, and current limitations.
+
 [Cosmopolitan Libc](https://justine.lol/cosmopolitan/index.html) makes C/C++
 a build-once run-anywhere language, like Java, except it doesn't need an
 interpreter or virtual machine. Instead, it reconfigures stock GCC and

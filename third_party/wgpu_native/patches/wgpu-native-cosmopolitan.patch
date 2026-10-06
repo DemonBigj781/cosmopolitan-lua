@@ -1,0 +1,21 @@
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -39,7 +39,7 @@
+ version = "29.0.1"
+ 
+ [lib]
+-crate-type = ["cdylib", "staticlib"]
++crate-type = ["staticlib"]
+ 
+ [features]
+ default = ["wgsl", "spirv", "glsl", "dx12", "metal", "vulkan", "gles"]
+@@ -105,9 +105,6 @@
+ [dependencies.hal]
+ workspace = true
+ 
+-[target.'cfg(all(unix, not(target_os = "ios"), not(target_os = "macos")))'.dependencies]
+-hal = { workspace = true, features = ["renderdoc"] }
+-
+ [target.'cfg(windows)'.dependencies]
+ hal = { workspace = true, features = ["dx12", "renderdoc"] }
+ 

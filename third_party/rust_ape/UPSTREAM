@@ -1,0 +1,8 @@
+Repository: https://github.com/starccy/rust-ape
+Commit: 0e2d0a89f4c089c7f21377a9c7ce51a6e82c2791
+Commit date: 2026-09-16
+License: MIT; see upstream/LICENSE
+Snapshot: all tracked files, without Git metadata
+
+Local integration: run.sh, stage.py, prepare.py and README.cosmo
+The upstream snapshot is unmodified.

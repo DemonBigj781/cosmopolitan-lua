@@ -1,0 +1,46 @@
+--- a/src/entry.rs
++++ b/src/entry.rs
+@@ -79,7 +79,7 @@
+         #[cfg(any(target_os = "macos", target_os = "ios"))]
+         const LIB_PATH: &str = "libvulkan.dylib";
+ 
+-        Self::load_from(LIB_PATH)
++        Self::load_from(if cfg!(rust_ape_shim) { "" } else { LIB_PATH })
+     }
+ 
+     /// Load entry points from a Vulkan loader linked at compile time
+@@ -136,6 +136,26 @@
+     #[cfg(feature = "loaded")]
+     #[cfg_attr(docsrs, doc(cfg(feature = "loaded")))]
+     pub unsafe fn load_from(path: impl AsRef<std::ffi::OsStr>) -> Result<Self, LoadingError> {
++        #[cfg(rust_ape_shim)]
++        {
++            // The C bridge chooses the OS loader at runtime and adapts every
++            // pointer returned by both Vulkan procedure resolvers. It retains
++            // successful loader handles until process exit.
++            extern "C" {
++                fn cosmo_wgpu_vulkan_entry(path: *const ffi::c_char) -> *const ffi::c_void;
++            }
++            let path = std::ffi::CString::new(path.as_ref().as_encoded_bytes())
++                .map_err(|_| MissingEntryPoint)?;
++            let address = cosmo_wgpu_vulkan_entry(path.as_ptr());
++            if address.is_null() {
++                return Err(MissingEntryPoint.into());
++            }
++            Ok(Self::from_static_fn(crate::StaticFn {
++                get_instance_proc_addr: mem::transmute(address),
++            }))
++        }
++        #[cfg(not(rust_ape_shim))]
++        {
+         let lib = Library::new(path)
+             .map_err(LoadingError::LibraryLoadFailure)
+             .map(alloc::sync::Arc::new)?;
+@@ -150,6 +170,7 @@
+             _lib_guard: Some(lib),
+             ..Self::from_static_fn(static_fn)
+         })
++        }
+     }
+ 
+     /// Load entry points based on an already-loaded [`crate::StaticFn`]

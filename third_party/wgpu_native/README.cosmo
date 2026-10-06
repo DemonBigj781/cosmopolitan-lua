@@ -1,0 +1,180 @@
+wgpu-native for Cosmopolitan: experimental headless compute
+=========================================================
+
+This directory imports the native WebGPU implementation and a small C
+compute check. The current integration targets the Vulkan backend without
+a surface, window, or presentation loop. It does not establish general
+rendering support or a tested Windows/Linux portability guarantee.
+
+The application uses the native WebGPU C API. The implementation behind
+that interface is Rust, with wgpu-core and wgpu-hal executing the GPU work.
+Vulkan support still requires an appropriate host Vulkan loader and driver.
+
+Pinned upstream sources
+-----------------------
+
+wgpu-native release: v29.0.1.1
+Repository: https://github.com/gfx-rs/wgpu-native
+Revision: 6aed50955d934ac36049ba8d002034841633ae02
+
+webgpu-headers (the native tree's ffi/webgpu-headers submodule):
+Repository: https://github.com/webgpu-native/webgpu-headers
+Revision: 673658bc2bd70ec39fc55ebe6bb0173cf6d0a603
+
+IMPORT.json records both immutable revisions, archive URLs and SHA-256
+digests, original hashes of every imported file, and the complete omitted
+file lists. These hashes describe the pristine imports before local port
+patches. Local patches must be reviewed separately from source provenance.
+
+The upstream directory contains regular vendored files. It has no nested
+Git repository, Git submodule entry, or CI workflow. Source archives omit
+Git submodule contents, so the pinned header tree was imported separately
+into upstream/ffi/webgpu-headers.
+
+Pruning is limited to upstream CI/Git metadata and material unrelated to
+the Rust library or compute example. The native tree retains Rust and FFI
+sources, Cargo metadata, build reference files, licenses, and the upstream
+compute/framework examples. GLFW, windowed/rendering examples, repository
+maintenance scripts, and their surrounding examples CMake entry point are
+omitted. Upstream Makefile/Meson files are retained as reference; their
+optional targets can still refer to intentionally omitted examples.
+
+The header tree retains the public API, schema/generator metadata, tests,
+documentation, and license, excluding its CI and Git metadata.
+
+License notices
+---------------
+
+wgpu-native is available under MIT OR Apache-2.0. Both original license
+texts are retained as upstream/LICENSE.MIT and upstream/LICENSE.APACHE.
+
+webgpu-headers uses BSD-3-Clause. Its original notice is retained as
+upstream/ffi/webgpu-headers/LICENSE.
+
+examples/compute.c adapts the upstream Collatz compute example and uses
+the same MIT OR Apache-2.0 license choice.
+
+Build inputs
+------------
+
+The integration build is maintained in build.sh and its associated port
+patches. The exact upstream toolchain file selects Rust 1.93. The upstream
+minimum supported Rust version is 1.87; those are different statements.
+The Cosmopolitan build deliberately selects rust-ape's patched
+nightly-2026-07-28 instead. The original Cargo.lock is retained, and the
+reviewed Cargo.cosmo.lock is used with --locked for the port. The release's
+original lockfile resolves wgpu-core/wgpu-hal/Naga to 29.0.3 despite the
+compatible 29.0.1 requirements in Cargo.toml.
+
+Local changes
+-------------
+
+The pristine upstream snapshot is never patched in place. prepare.py
+verifies it and stages changes under o/webgpu:
+
+  - patches/wgpu-native-cosmopolitan.patch selects a static library only
+    and removes the Unix RenderDoc feature, which would use an unadapted
+    native-library interface.
+  - patches/ash-cosmopolitan.patch changes ash's entry loader only when
+    rust_ape_shim is set. The C port owns runtime library selection and
+    all function-pointer adapters.
+  - patches/wgpu-hal-cosmopolitan.patch rejects Vulkan debug/validation
+    flags and custom instance callbacks because their reverse ABI/TLS
+    boundary is not implemented in this initial compute target.
+
+Patched crates are downloaded from the immutable crates.io distribution
+and checked against the original Cargo.lock checksums:
+
+  ash 0.38.0+1.3.281
+  SHA256 0bb44936d800fea8f016d7f2311c6a4f97aebd5dc86f09906139ec848cf3a46f
+  Source https://github.com/ash-rs/ash
+  License MIT OR Apache-2.0
+
+  wgpu-hal 29.0.3
+  SHA256 31f8e1a9e7a8512f276f7c62e018c7fa8d60954303fed2e5750114332049193f
+  Source https://github.com/gfx-rs/wgpu
+  License MIT OR Apache-2.0
+
+generate_vulkan_signatures.py checks the exact ash dispatch-table hashes
+before deriving metadata for all 684 procedure names. Each forward call
+uses scalar argument metadata; unknown procedures fail closed. The C
+Windows adapter is checked against host GCC ms_abi functions, including
+mixed floating point and stack arguments. These tests do not run Windows.
+
+Runtime patches and their provenance are in ../rust_ape/README.cosmo.
+New loader/build helpers use MIT; original dependency notices are retained.
+
+The Rust compilation environment must contain:
+
+    WGPU_NATIVE_VERSION=v29.0.1.1
+
+wgpuGetVersion reads that value at Rust compile time. Without it, upstream
+returns zero, and the C example's version check deliberately fails.
+
+The C example needs these include directories:
+
+    third_party/wgpu_native/upstream/ffi
+    third_party/wgpu_native/upstream/ffi/webgpu-headers
+
+Its executable must link against the ported wgpu-native library. Merely
+compiling these headers or linking an ordinary host-specific Rust library
+does not validate a Cosmopolitan runtime or a portable APE build.
+
+Executable checks
+-----------------
+
+Run the resulting compute executable with --version to call wgpuGetVersion
+across the C/Rust boundary. It verifies the actual returned value against
+0x1d000101 (29.0.1.1). This path does not initialize WebGPU or a GPU backend.
+
+Run it without arguments for the complete headless check:
+
+  1. Create a WebGPU instance restricted to the Vulkan backend.
+  2. Request a Vulkan adapter and device and print the adapter identity.
+  3. Compile the embedded WGSL Collatz shader.
+  4. Upload [1, 2, 3, 4], dispatch four workgroups, and copy to readback memory.
+  5. Check every mapped output against [0, 1, 7, 2].
+  6. Release the created WebGPU objects.
+
+The WGSL source is a C string embedded in the executable. No external
+shader, GLFW installation, display server, or current directory is needed.
+The result identifies CPU/software adapters instead of describing them as
+physical GPU validation. A passing software Vulkan test checks functional
+execution but does not measure GPU performance.
+
+All checks remain active with NDEBUG. Adapter/device/map callback errors,
+uncaptured WebGPU errors, unexpected backend selection, version mismatch,
+and incorrect output fail the executable. Callback polling uses a
+30-second monotonic timeout instead of an indefinite device wait. A test
+runner should still impose a process timeout for a driver that hangs
+inside an individual native API call.
+
+Exit status:
+
+    0  The requested check passed.
+    2  Invalid command-line usage.
+    3  Linked Rust version differs from the pinned release.
+    4  Instance, adapter, or device initialization failed.
+    5  Execution, shader, mapping, device-loss, or uncaptured API error.
+    6  A callback did not complete before the polling timeout.
+    7  Compute readback differs from the expected values.
+
+Scope of this port
+------------------
+
+The instance explicitly sets Vulkan as its only backend and sets native
+instance flags to zero. This avoids enabling Vulkan debug/validation
+callbacks, which introduce additional reverse ABI and foreign TLS work
+at the driver boundary. Normal WebGPU API validation remains enabled.
+
+Headless compute is the experimental integration target. Window-system
+surfaces, swapchains, generic graphics pipelines, and driver debug callbacks
+need their own runtime coverage before being represented as supported.
+Forward mixed floating-point signatures have host ABI tests, which do not
+establish general rendering support. Unsupported calls fail closed.
+
+Successful --version output establishes a narrow C/Rust linkage check.
+Successful compute output additionally establishes shader execution and
+readback on the reported backend/adapter in the environment where it ran.
+Neither result alone establishes that the same APE binary was tested on
+another operating system; record any such runs separately.

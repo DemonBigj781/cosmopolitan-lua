@@ -1,0 +1,220 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      strace:
+        description: "Run the examples under --strace (cosmo's syscall trace). Very verbose, useful for debugging hangs."
+        type: boolean
+        default: false
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Build the examples once on Linux, then run them on all hosts.
+  build:
+    name: build (linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+
+      # every shim symbol must be referenced by a patch
+      - run: ./patches/check-symbols.sh
+
+      - uses: actions/cache@v6
+        with:
+          path: cache
+          key: sdk-${{ runner.os }}-${{ hashFiles('xtask/src/config.rs') }}
+
+      - name: Install the pinned toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            .
+            examples
+
+      - run: cargo xtask setup
+
+      # find the mismatch struct size between musl and cosmo
+      - run: python3 scripts/struct-scan.py
+
+      - name: Build the examples
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo xtask build examples 2>&1 | tee build.log
+          if grep -q 'linking without Apple Silicon support' build.log; then
+            echo "::error::apelink dropped Apple Silicon support; macos-latest would fail"
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: examples
+          path: examples/target/ape/debug/*.com
+          retention-days: 7
+          if-no-files-found: error
+
+  # Run the same set of binaries on every host.
+  run:
+    name: run (${{ matrix.label }})
+    needs: build
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux-x64, os: ubuntu-latest }
+          - { label: linux-arm64, os: ubuntu-24.04-arm }
+          - { label: windows-x64, os: windows-latest }
+          - { label: windows-arm64, os: windows-11-arm }
+          - { label: macos-arm64, os: macos-latest }
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: examples
+          path: ape
+
+      - name: Run every example
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          chmod +x ape/*.com
+          # Give each example a 60s cap so a hanging example doesn't block the rest.
+          cat > /tmp/run-capped.pl <<'PERL'
+          my $t = shift;
+          my $pid = fork;
+          die "fork: $!" unless defined $pid;
+          if ($pid == 0) { exec @ARGV; exit 127 }
+          $SIG{ALRM} = sub { kill 'KILL', $pid; waitpid $pid, 0; exit 142 };
+          alarm $t;
+          waitpid $pid, 0;
+          exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
+          PERL
+          # cosmo writes its trace to stderr and eats the flag before argv, so
+          # this doesn't disturb what the program itself sees or prints.
+          strace=""
+          [ "${{ inputs.strace }}" = "true" ] && strace="--strace"
+          fail=0
+          : > /tmp/summary.txt
+          now_ms() { perl -MTime::HiRes=time -e 'printf "%d", time()*1000'; }
+          for b in ape/*.com; do
+            name=$(basename "$b")
+            t0=$(now_ms)
+            if perl /tmp/run-capped.pl 60 "$b" $strace >/tmp/out.txt 2>/tmp/err.txt; then
+              status="ok"
+            else
+              rc=$?
+              [ $rc -eq 142 ] && status="TIMED OUT after 60s" || status="FAILED (exit $rc)"
+              fail=1
+            fi
+            ms=$(( $(now_ms) - t0 ))
+            
+            echo "::group::$name - $status (${ms}ms)"
+            cat /tmp/out.txt
+            if [ -s /tmp/err.txt ]; then
+              echo "--- stderr"
+              # Traces can be hundreds of lines, only keep the tail.
+              if [ -n "$strace" ]; then tail -200 /tmp/err.txt; else cat /tmp/err.txt; fi
+            fi
+            echo "::endgroup::"
+            [ "$status" = ok ] || echo "::error title=$name::$status"
+            printf '%-24s %-20s %6sms\n' "$name" "$status" "$ms" >> /tmp/summary.txt
+          done
+          echo "=== summary"
+          cat /tmp/summary.txt
+          exit $fail
+
+      - name: Run every example
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $strace = if ("${{ inputs.strace }}" -eq "true") { @("--strace") } else { @() }
+          $fail = 0
+          $summary = @()
+          foreach ($b in Get-ChildItem ape\*.com) {
+            $o = New-TemporaryFile
+            $e = New-TemporaryFile
+            $args = @{}
+            if ($strace) { $args["ArgumentList"] = $strace }
+            $sw = [System.Diagnostics.Stopwatch]::StartNew()
+            $p = Start-Process -FilePath $b.FullName -PassThru -NoNewWindow @args `
+                 -RedirectStandardOutput $o -RedirectStandardError $e
+            if ($p.WaitForExit(60000)) {
+              if ($p.ExitCode -eq 0) { $status = "ok" }
+              else { $status = "FAILED (exit $($p.ExitCode))"; $fail = 1 }
+            } else {
+              $p.Kill()
+              # Kill returns before the child lets go of the redirect handles.
+              $p.WaitForExit()
+              $status = "TIMED OUT after 60s"
+              $fail = 1
+            }
+            $sw.Stop()
+            $ms = $sw.ElapsedMilliseconds
+            "::group::$($b.Name) - $status (${ms}ms)"
+            Get-Content $o -ErrorAction SilentlyContinue
+            if ((Get-Item $e -ErrorAction SilentlyContinue).Length -gt 0) {
+              "--- stderr"
+              if ($strace) { Get-Content $e -Tail 200 } else { Get-Content $e }
+            }
+            "::endgroup::"
+            if ($status -ne "ok") { "::error title=$($b.Name)::$status" }
+            $summary += "{0,-24} {1,-20} {2,6}ms" -f $b.Name, $status, $ms
+            Remove-Item $o, $e -Force -ErrorAction SilentlyContinue
+          }
+          "=== summary"
+          $summary
+          exit $fail
+
+      # The unc_* examples only exercise their UNC cases when the cwd is a
+      # \\server\share path.
+      - name: Run the unc examples on a share
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $unc = "\\localhost\apeci"
+          New-Item -ItemType Directory -Force C:\srv\share | Out-Null
+          New-SmbShare -Name apeci -Path C:\srv\share -FullAccess Everyone | Out-Null
+          New-Item -ItemType SymbolicLink -Path C:\srv\share-link -Target $unc | Out-Null
+          Copy-Item ape\unc_*.com $unc\
+          $env:RUST_APE_UNC_LINK = "/C/srv/share-link"
+          $strace = if ("${{ inputs.strace }}" -eq "true") { @("--strace") } else { @() }
+          $fail = 0
+          foreach ($b in Get-ChildItem $unc\*.com) {
+            $o = New-TemporaryFile
+            $e = New-TemporaryFile
+            $extra = @{}
+            if ($strace) { $extra["ArgumentList"] = $strace }
+            $p = Start-Process -FilePath $b.FullName -WorkingDirectory $unc `
+                 -PassThru -NoNewWindow @extra `
+                 -RedirectStandardOutput $o -RedirectStandardError $e
+            if ($p.WaitForExit(60000)) {
+              if ($p.ExitCode -eq 0) { $status = "ok" }
+              else { $status = "FAILED (exit $($p.ExitCode))"; $fail = 1 }
+            } else {
+              $p.Kill()
+              $p.WaitForExit()
+              $status = "TIMED OUT after 60s"
+              $fail = 1
+            }
+            "::group::$($b.Name) on $unc - $status"
+            Get-Content $o -ErrorAction SilentlyContinue
+            if ((Get-Item $e -ErrorAction SilentlyContinue).Length -gt 0) {
+              "--- stderr"
+              if ($strace) { Get-Content $e -Tail 200 } else { Get-Content $e }
+            }
+            "::endgroup::"
+            if ($status -ne "ok") { "::error title=$($b.Name) (UNC)::$status" }
+            Remove-Item $o, $e -Force -ErrorAction SilentlyContinue
+          }
+          exit $fail

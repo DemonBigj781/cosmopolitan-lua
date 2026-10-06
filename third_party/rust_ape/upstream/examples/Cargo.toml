@@ -1,0 +1,78 @@
+[workspace]
+
+[package]
+name = "rust-ape-examples"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+ape = { path = "../ape" }
+# Pulls in async-io, async-process and polling
+smol = "2"
+# Pulls in getrandom.
+rand = "0.10.2"
+tempfile = "3.27.0"
+# errno_codes compares raw_os_error against these constants; resolves to the
+# cosmo-adapted copy through [patch.crates-io] like everything else.
+libc = "0.2"
+sha2 = "0.11.0"
+blake3 = "1.8.6"
+md-5 = "0.11.0"
+ureq = "3.4.0"
+# Carries crossterm, whose default event source is mio. tui_demo reaches it
+# through ratatui::crossterm rather than a direct dependency, so there is one
+# crossterm in the tree and it is the mio one. This used to be pinned to
+# `use-dev-tty` to stay off mio; shim/epoll.c is what made that unnecessary.
+ratatui = "0.30.2"
+# file_watch. notify picks its backend off the target triple, so it reaches for
+# inotify on every host and lands on shim/inotify.c.
+notify = "8"
+# pty. Its unix path wants TIOCSCTTY from the child between fork and exec,
+# which shim/termios.c answers.
+portable-pty = "0.9"
+# parking_lot parks via raw syscall(SYS_futex) — the __ape_shim_syscall path.
+parking_lot = "0.12"
+# safe wrapper for if_name_index
+nix = { version = "0.31", features = ["net"] }
+# tokio reaches the IO driver through mio, which picks epoll on a linux target
+# and gets it from shim/epoll.c. These examples are the only thing exercising
+# that shim through a real runtime rather than the probe.
+tokio = { version = "1", features = ["full"] }
+# tokio_codec only.
+tokio-util = { version = "0.7", features = ["full"] }
+futures-util = { version = "0.3", features = ["sink"] }
+# reqwest_client. The TLS stack is assembled by hand because reqwest's default
+# aws-lc-rs guards its assembly on __linux__, which cosmocc undefines, leaving
+# an object with no symbol table. ring's asm is guarded on __ELF__ instead.
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "json", "charset", "http2", "query", "form", "multipart", "stream",
+    "cookies", "gzip", "brotli", "deflate", "zstd", "blocking", "socks",
+    "hickory-dns", "system-proxy", "rustls-no-provider" ] }
+rustls = { version = "0.23", default-features = false, features = [
+    "ring", "std", "tls12", "logging" ] }
+webpki-roots = "1"
+serde = { version = "1", features = ["derive"] }
+flate2 = "1"
+# reqwest's zstd feature reaches zstd-sys, whose huf_decompress_amd64.S hits
+# the same __linux__ trap. Named only to turn `no_asm` on through feature
+# unification.
+zstd-sys = { version = "2", features = ["no_asm"] }
+# local_time. chrono's Local reads TZ and /etc/localtime and parses the TZif
+# itself; there is no way to compile a database in, which is exactly the gap
+# the example measures.
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+# local_time. tzdb-bundle-always compiles the IANA database into the binary,
+# which is what makes a zone name resolvable on a host that ships no tzdata.
+# The default tzdb-bundle-platform bundles by target_os, and this target says
+# linux, so it would leave Windows with nothing.
+jiff = { version = "0.2.35", features = ["tzdb-bundle-always"] }
+zip = { version = "8.6.0", default-features = false }
+# proc_sysinfo. Its linux backend reads /proc and /sys, which is what
+# shim/procfs/ emulates on other platforms. The example is that emulation's
+# acceptance test in-tree.
+sysinfo = "0.39"
+
+[patch.crates-io]
+errno = { path = "../vendor/patches/errno" }
+libc = { path = "../vendor/patches/libc" }

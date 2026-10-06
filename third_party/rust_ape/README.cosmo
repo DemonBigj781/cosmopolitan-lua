@@ -1,0 +1,103 @@
+# Rust runtime for the WebGPU integration
+
+This directory vendors the experimental [rust-ape SDK](https://github.com/starccy/rust-ape)
+at commit `0e2d0a89f4c089c7f21377a9c7ce51a6e82c2791`. The unmodified source is
+in `upstream/`; its MIT license and original documentation are included.
+
+Rust's normal Linux standard library bakes in Linux constants, structure layouts,
+thread-local storage and system calls. Linking those objects with Cosmopolitan
+alone does not make them portable. This SDK rebuilds patched `std` and `libc`,
+adds a C shim that translates at the runtime boundary, and routes synchronization
+through Cosmopolitan. It includes an upstream `parking_lot_sync` execution test,
+which matters because wgpu-native uses `parking_lot`.
+
+## Build tools
+
+Run these commands from the repository root on Linux x86-64:
+
+```sh
+third_party/rust_ape/run.sh setup
+third_party/rust_ape/run.sh paths
+```
+
+The wrapper installs Rustup 1.28.2, Rust `nightly-2026-07-28` with `rust-src`,
+patched libc 0.2.189 and errno 0.3.14, and the SDK's pinned Cosmocc 4.0.2.
+Rustup and Cosmocc archives have pinned SHA-256 checks. `curl`, `sha256sum`,
+`tar`, `unzip`, `patch`, `python3` and a native `cc` must already be installed.
+The first setup downloads compilers and packages; later setup calls reuse them.
+If the archive extractor represents compiler symlinks as text placeholders,
+`prepare.py` restores only the links recorded in the verified Cosmocc archive.
+
+All generated SDK files, downloaded toolchains, Cargo packages and Cargo-mode
+outputs live under `o/rust-ape/`. Set `COSMO_RUST_BUILD_ROOT` to use another
+build directory. The wrapper does not change the user's default Rust toolchain.
+The source snapshot is staged once with a content fingerprint. Later commands
+preserve SDK source files and lockfiles; a changed vendored snapshot requires a
+new build directory instead of silently resetting that working copy.
+The vendored SDK uses a released Cosmocc rather than rebuilding this repository's
+entire C toolchain; the exact runtime/toolchain choice remains explicit.
+
+For a new executable project under the build directory:
+
+```sh
+third_party/rust_ape/run.sh generate "$PWD/o/rust-ape/hello"
+third_party/rust_ape/run.sh build "$PWD/o/rust-ape/hello"
+sh o/rust-ape/hello/target/ape/debug/hello.com
+```
+
+Upstream `build` compiles once per CPU architecture and packs the x86-64 and
+arm64 code into one APE. It does not create separate Windows and Linux builds.
+The same APE is the artifact to test on both operating systems.
+
+## Building the wgpu static library
+
+The lower-level `cargo` command supplies the target specification, patched std,
+crate patches and Cosmopolitan C tool variables to an existing Cargo project:
+
+```sh
+third_party/rust_ape/run.sh cargo rustc \
+  --manifest-path /absolute/path/to/the/prepared/wgpu-native/Cargo.toml \
+  --lib --crate-type staticlib --no-default-features --features wgsl,vulkan
+```
+
+Use the prepared integration source, including its Vulkan loader adaptation.
+`COSMO_RUST_ARCH=x86_64` is the default; `aarch64` selects the other CPU target.
+Cargo-mode output is under `o/rust-ape/build/<target>/<profile>/`. A static archive
+is intermediate code: it becomes an APE only after the final Cosmopolitan link.
+If an existing lockfile selects another libc/errno release, update that lockfile
+to the patched versions rather than accepting an unused-patch warning.
+
+## Boundary with the GPU port
+
+The SDK solves a portion of Rust runtime compatibility. It does not patch
+`libloading` or Ash's Vulkan dispatcher. In particular:
+
+- Ordinary `dlopen` is not Cosmopolitan's foreign-library API. Use
+  `cosmo_dlopen`, `cosmo_dlsym` and the appropriate native call bridge.
+- Under this Linux-personality target, Rust `extern "system"` is the SysV
+  calling convention. Windows Vulkan functions need the Microsoft x64 convention.
+- Selecting `libvulkan.so.1` at compile time is insufficient; the loader must
+  select `vulkan-1.dll` on Windows at runtime and adapt queried function pointers.
+- Code executing on foreign driver threads needs additional care with
+  Cosmopolitan thread state. The upstream host API example discusses this limit.
+
+The relevant cfg is `rust_ape_shim`. The wrapper also supplies `rustix_use_libc`,
+`polling_test_poll_backend` and `mio_unsupported_force_waker_pipe`, matching the
+upstream SDK. `ape::is_windows()` and the other `ape` OS helpers report the
+runtime host; Rust's `cfg(windows)` does not.
+
+This is experimental integration infrastructure. A successful Rust sample or
+static-library link does not establish that WebGPU computation works on every
+host. Validation must execute the same final APE on Linux and Windows, including
+a compute operation whose result is checked.
+
+## Verification recorded on 2026-10-06
+
+On Linux x86-64, the pinned nightly installed, all three upstream patches applied,
+and a minimal executable using the upstream `parking_lot_sync.rs` sample built
+against patched std, libc 0.2.189 and parking_lot 0.12.5. After APE packaging,
+Cosmocc's `pecheck` passed and execution printed
+`parking_lot_sync: all assertions passed`. The sample checks contended mutual
+exclusion, a timed condition-variable wait without busy spinning, and a wakeup
+between threads. This establishes a working Rust runtime path on the tested
+Linux host; it does not assert a WebGPU result or a Windows execution result.
