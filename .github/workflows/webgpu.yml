@@ -310,7 +310,8 @@ jobs:
       # 475507a24f8f80cdf94d3ce0a9e2e328c7237e7c. The SHA-256 is the release
       # asset digest published by pal1000/mesa-dist-win for version 26.1.3.
       # The loader comes from LunarG's official runtime components ZIP.
-      # Both packages remain local to this job; no installer or admin is used.
+      # Packages remain local to this job. The hosted Windows runner is elevated,
+      # so driver discovery also needs the standard temporary registry entry.
       - name: Prepare pinned Windows Vulkan runtime and software driver
         run: |
           $ErrorActionPreference = 'Stop'
@@ -332,15 +333,23 @@ jobs:
             throw 'Vulkan runtime checksum mismatch'
           }
 
-          & 7z.exe e mesa.7z -omesa -y `
-            'x64/opengl32.dll' `
-            'x64/libgallium_wgl.dll' `
-            'x64/libglapi.dll' `
-            'x64/vulkan_lvp.dll' `
-            'x64/lvp_icd.x86_64.json'
+          # Preserve architecture directories: flat extraction can overwrite an
+          # x64 DLL with its x86 counterpart. Use native Windows archive paths.
+          # This pinned archive has no libglapi.dll; its four files below were
+          # checked against the actual archive, not assumed from upstream CI.
+          $mesaFiles = @(
+            'x64\opengl32.dll',
+            'x64\libgallium_wgl.dll',
+            'x64\vulkan_lvp.dll',
+            'x64\lvp_icd.x86_64.json'
+          )
+          $extractArgs = @('x', 'mesa.7z', '-omesa', '-y', '-r-') + $mesaFiles
+          & 7z.exe @extractArgs
           if ($LASTEXITCODE -ne 0) { throw 'Mesa extraction failed' }
-          foreach ($name in @('vulkan_lvp.dll', 'lvp_icd.x86_64.json')) {
-            if (-not (Test-Path (Join-Path 'mesa' $name))) { throw "Missing Mesa file: $name" }
+          foreach ($relativePath in $mesaFiles) {
+            if (-not (Test-Path (Join-Path 'mesa' $relativePath))) {
+              throw "Missing Mesa file: $relativePath"
+            }
           }
 
           $runtimeDir = New-Item -ItemType Directory -Path windows-runtime -Force
@@ -356,9 +365,42 @@ jobs:
           } finally {
             $zip.Dispose()
           }
+          function Assert-X64PE([string] $path) {
+            $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path $path).Path)
+            if ($bytes.Length -lt 64 -or $bytes[0] -ne 0x4d -or $bytes[1] -ne 0x5a) {
+              throw "Invalid PE file: $path"
+            }
+            $peOffset = [BitConverter]::ToInt32($bytes, 0x3c)
+            if ($peOffset -lt 0 -or $peOffset -gt $bytes.Length - 6 -or
+                [BitConverter]::ToUInt32($bytes, $peOffset) -ne 0x00004550 -or
+                [BitConverter]::ToUInt16($bytes, $peOffset + 4) -ne 0x8664) {
+              throw "Expected x64 PE file: $path"
+            }
+            Write-Host "Verified x64 PE: $path"
+          }
+          foreach ($relativePath in $mesaFiles) {
+            if ($relativePath.EndsWith('.dll')) {
+              $dll = Join-Path 'mesa' $relativePath
+              Assert-X64PE $dll
+              Copy-Item $dll .
+            }
+          }
+          foreach ($name in @('vulkan-1.dll', 'vulkaninfo.exe')) {
+            Assert-X64PE (Join-Path $runtimeDir.FullName $name)
+          }
           Copy-Item (Join-Path $runtimeDir.FullName 'vulkan-1.dll') .
-          Copy-Item 'mesa/*.dll' .
-          $icd = (Resolve-Path 'mesa/lvp_icd.x86_64.json').Path
+          $icd = (Resolve-Path 'mesa/x64/lvp_icd.x86_64.json').Path
+
+          # Vulkan-Loader v1.4.357 ignores VK_DRIVER_FILES/VK_ICD_FILENAMES at
+          # high Windows integrity. Register this software ICD using its
+          # documented HKLM discovery mechanism; do not disable that safeguard.
+          # https://github.com/KhronosGroup/Vulkan-Loader/blob/v1.4.357/docs/LoaderDriverInterface.md
+          $driverRegistry = 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers'
+          if (-not (Test-Path -LiteralPath $driverRegistry)) {
+            New-Item -Path $driverRegistry -Force | Out-Null
+          }
+          New-ItemProperty -LiteralPath $driverRegistry -Name $icd -PropertyType DWord -Value 0 -Force | Out-Null
+          Write-Host "Registered software Vulkan ICD: $icd"
           Add-Content -Path $env:GITHUB_ENV -Value @(
             "VK_DRIVER_FILES=$icd",
             "VK_ICD_FILENAMES=$icd",
@@ -390,6 +432,19 @@ jobs:
             'The executable kept the original build SHA-256; its application and WebGPU backend were not rebuilt.',
             'Mesa lavapipe executes Vulkan on the CPU. This validates the Windows API path, not physical GPU performance.'
           )
+
+      - name: Remove this job's software-driver registration
+        if: always()
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $driverRegistry = 'HKLM:\SOFTWARE\Khronos\Vulkan\Drivers'
+          if ((Test-Path 'mesa/x64/lvp_icd.x86_64.json') -and (Test-Path $driverRegistry)) {
+            $icd = (Resolve-Path 'mesa/x64/lvp_icd.x86_64.json').Path
+            $key = Get-Item -LiteralPath $driverRegistry
+            if ($key.GetValueNames() -contains $icd) {
+              Remove-ItemProperty -LiteralPath $driverRegistry -Name $icd
+            }
+          }
 
       - name: Upload Windows compute diagnostics
         if: always()
