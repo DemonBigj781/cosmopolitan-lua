@@ -1,0 +1,139 @@
+name: Build Linux x64
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Generic Linux x86-64
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      LC_ALL: C
+      PACKAGE: cosmopolitan-lua-linux-x86_64
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            make unzip wget ca-certificates binutils file
+
+      # Build helpers use APE; the distributed Lua binary is a native ELF.
+      - name: Enable APE for build helpers
+        run: |
+          sudo install -m 0755 build/bootstrap/ape.elf /usr/bin/ape
+          if [[ ! -e /proc/sys/fs/binfmt_misc/register ]]; then
+            sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc
+          fi
+          if [[ ! -e /proc/sys/fs/binfmt_misc/APE ]]; then
+            printf '%s\n' ':APE:M::MZqFpD::/usr/bin/ape:' |
+              sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null
+          fi
+          if [[ ! -e /proc/sys/fs/binfmt_misc/APE-jart ]]; then
+            printf '%s\n' ':APE-jart:M::jartsr::/usr/bin/ape:' |
+              sudo tee /proc/sys/fs/binfmt_misc/register > /dev/null
+          fi
+
+      - name: Cache the repository-pinned compiler
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .cosmocc
+          key: cosmocc-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Makefile', 'build/download-cosmocc.sh') }}
+
+      # The coverage gate needs the tracing and symbols in default mode.
+      - name: Run Lua binding and annotation tests
+        run: make -j"$(nproc)" MODE= o//tool/lua/test
+
+      - name: Build release Lua for a generic x86-64 CPU
+        run: |
+          make -j"$(nproc)" MODE=rel \
+            TARGET_ARCH="-march=x86-64 -mtune=generic" \
+            o/rel/tool/lua/lua.dbg \
+            o/rel/tool/build/apelink.dbg
+
+      - name: Create a static Linux ELF
+        run: |
+          mkdir -p "dist/$PACKAGE/bin"
+          # -V1 selects Linux; apelink preserves the embedded ZIP resources.
+          o/rel/tool/build/apelink.dbg -V1 -s \
+            -o "dist/$PACKAGE/bin/lua" o/rel/tool/lua/lua.dbg
+          chmod 0755 "dist/$PACKAGE/bin/lua"
+          cp LICENSE "dist/$PACKAGE/LICENSE"
+          printf 'Repository: %s\nCommit: %s\nTarget: Linux x86-64\nCPU: x86-64 baseline\nRuntime: statically linked Cosmopolitan\n' \
+            "$GITHUB_REPOSITORY" "$GITHUB_SHA" > "dist/$PACKAGE/BUILD-INFO.txt"
+
+      - name: Verify architecture, static linking, bindings, and resources
+        run: |
+          lua="dist/$PACKAGE/bin/lua"
+          file "$lua"
+          readelf -hW "$lua" | grep -E 'Class:.*ELF64'
+          readelf -hW "$lua" | grep -E 'Machine:.*Advanced Micro Devices X86-64'
+          if readelf -lW "$lua" | grep -q 'INTERP'; then
+            echo "::error::Lua unexpectedly requires an ELF interpreter"
+            exit 1
+          fi
+          if readelf -dW "$lua" | grep -q '(NEEDED)'; then
+            echo "::error::Lua unexpectedly requires shared libraries"
+            exit 1
+          fi
+          "$lua" -v
+          "$lua" - <<'LUA'
+          local cosmo = require("cosmo")
+          assert(cosmo.DecodeJson('{"answer":42}').answer == 42)
+          local f = assert(io.open("/zip/.lua/definitions.lua", "rb"))
+          assert(#assert(f:read("*a")) > 0)
+          assert(f:close())
+          print("Linux x86-64 Lua bindings and embedded resources: OK")
+          LUA
+
+      - name: Package executable and checksums
+        run: |
+          (
+            cd "dist/$PACKAGE"
+            sha256sum bin/lua LICENSE BUILD-INFO.txt > SHA256SUMS
+          )
+          tar -C dist -czf "dist/$PACKAGE.tar.gz" "$PACKAGE"
+          (
+            cd dist
+            sha256sum "$PACKAGE.tar.gz" > "$PACKAGE.tar.gz.sha256"
+          )
+          {
+            echo "### Linux x86-64 build"
+            echo
+            printf 'Download the artifact and extract `%s.tar.gz`.\n' "$PACKAGE"
+            printf 'Run `%s/bin/lua -v` or `%s/bin/lua script.lua`.\n' "$PACKAGE" "$PACKAGE"
+            echo
+            echo "Static Cosmopolitan runtime; no glibc or APE loader installation required."
+            echo "The archive preserves executable permissions."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload Linux x64 artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: cosmopolitan-lua-linux-x86_64
+          path: |
+            dist/cosmopolitan-lua-linux-x86_64.tar.gz
+            dist/cosmopolitan-lua-linux-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
