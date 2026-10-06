@@ -5,13 +5,13 @@ implementation into one x86-64 Actually Portable Executable (APE)**. The selecte
 backend is Vulkan. It does not bundle separately compiled Windows and Linux
 copies of wgpu-native.
 
-The initial program is a headless compute check. Local and CI Linux runs have
-compiled the embedded WGSL shader, dispatched four workgroups, and verified
-every result through Mesa lavapipe. CI has also called the embedded WebGPU
-version API on Windows using the same executable compiled on Linux. Windows
-compute is checked separately from startup. Lavapipe is a CPU/software adapter;
-physical GPU acceleration still needs hardware tests. This is an experimental
-compute foundation for an AI runtime.
+The initial program is a headless compute check. CI has compiled one executable
+on Linux, then run that exact file on **both Windows and Linux**. Both compute
+jobs compiled the embedded WGSL shader, dispatched four workgroups, and
+verified every result through Mesa lavapipe. Startup and full compute are
+separate checks, and the executable's hash remains unchanged after each run.
+Lavapipe is a CPU/software adapter; physical GPU acceleration still needs
+hardware tests. This is an experimental compute foundation for an AI runtime.
 
 ## Build
 
@@ -79,11 +79,10 @@ On Windows x86-64, copy the **same** `webgpu_compute.exe` and run in PowerShell:
 .\webgpu_compute.exe
 ```
 
-The compute command needs a compatible installed Vulkan loader/driver. A
-Windows PE header and successful host ABI simulation are not substitutes for
-testing those commands on Windows. The branch's CI downloads the one Linux
-build artifact for independent Linux and Windows startup tests, and separately
-tests compute on both systems using lavapipe. The Windows compute job downloads
+The compute command needs a compatible installed Vulkan loader/driver. The
+branch's CI downloads the one Linux build artifact for independent Linux and
+Windows startup tests, and separately tests compute on both systems using
+lavapipe. All four runtime checks have passed. The Windows compute job downloads
 checksum-pinned Mesa and LunarG runtime components; it does not rebuild wgpu.
 Set `COSMO_WGPU_TRACE=1` for stage markers and WebGPU debug messages. The
 sample also enables Cosmopolitan crash reports, and CI retains its matching
@@ -102,7 +101,7 @@ Local and CI validation on 2026-10-06:
 | WebGPU shader dispatch/readback | Passed on Linux lavapipe | Buffer upload, WGSL compilation, Vulkan execution, synchronization, and exact output |
 | Executable hash before/after both runs | Unchanged | Both checks executed the same file without rewriting it |
 | Same-artifact Windows startup in CI | Passed | The Linux-built executable calls the embedded Rust WebGPU API on Windows with its hash unchanged |
-| Windows WebGPU compute | Pending | Checked separately from startup by the Windows software Vulkan job |
+| Same-artifact Windows WebGPU compute in CI | Passed on Windows lavapipe | Native driver calls, WGSL compilation, dispatch, synchronization, and verified readback from the Linux-built APE |
 | Physical GPU acceleration | Pending | Software Vulkan does not establish hardware support or performance |
 
 The successful compute run reported:
@@ -115,6 +114,21 @@ input: [1, 2, 3, 4]
 readback: [0, 1, 7, 2]
 headless Vulkan compute and readback: PASS
 ```
+
+The complete [CI run 37477427021](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37477427021)
+passed all five jobs at implementation commit
+`2a16f968e3a2081d2dd227d3917882c0a7f5d7c7`. The Windows compute run reported Mesa
+26.1.3 / LLVM 22.1.8 and the same `[0, 1, 7, 2]` readback. Its application was the
+one [build artifact](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37477427021/artifacts/11420085681)
+used by every runtime job, with SHA-256:
+
+```text
+0e38dc8593e2e686da657a113293e3418d74598e04d149c41fd97fbc07426df3
+```
+
+The native Windows thread stack correction below resolved the previously
+observed access violation in this tested configuration. These software-driver
+results do not establish a physical GPU vendor compatibility matrix.
 
 ## How the integration works
 

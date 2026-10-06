@@ -10,9 +10,10 @@ release and the experimental **rust-ape** runtime. It builds a C application,
 the Rust WebGPU implementation, and the Vulkan backend into one x86-64 APE.
 The first target is headless compute on Windows and Linux.
 
-An actual Linux run through Mesa lavapipe has passed shader compilation,
-dispatch, and numerical readback. Windows execution and hardware acceleration
-are separate validation gates. See the [WebGPU integration guide](third_party/wgpu_native/README.md)
+The same Linux-built executable has passed startup, shader compilation,
+dispatch, and numerical readback on both Windows and Linux through Mesa
+lavapipe. [All five CI checks passed](https://github.com/DemonBigj781/cosmopolitan-lua/actions/runs/37477427021).
+Physical GPU acceleration still needs hardware tests. See the [WebGPU integration guide](third_party/wgpu_native/README.md)
 for the build command, measured results, architecture, and current limitations.
 
 [Cosmopolitan Libc](https://justine.lol/cosmopolitan/index.html) makes C/C++
